@@ -1,0 +1,436 @@
+package com.soltini.app.overlay
+
+import android.annotation.SuppressLint
+import android.app.NotificationChannel
+import android.app.NotificationManager
+import android.app.PendingIntent
+import android.app.Service
+import android.content.Context
+import android.content.Intent
+import android.graphics.Color
+import android.graphics.PixelFormat
+import android.os.Build
+import android.os.Handler
+import android.os.IBinder
+import android.os.Looper
+import android.provider.Settings
+import android.view.Gravity
+import android.view.MotionEvent
+import android.view.View
+import android.view.ViewConfiguration
+import android.view.WindowManager
+import android.webkit.WebSettings
+import android.webkit.WebView
+import android.webkit.WebViewClient
+import android.widget.FrameLayout
+import android.widget.TextView
+import androidx.core.app.NotificationCompat
+import com.soltini.app.MainActivity
+import com.soltini.app.R
+import com.soltini.app.bridge.AriaNativeBridge
+import kotlin.math.abs
+import kotlin.math.max
+import kotlin.math.min
+
+/**
+ * DraggableFrameLayout — intercepts touch events BEFORE they reach the WebView child.
+ * This is the key fix: the WebView normally consumes all touch events, preventing the
+ * parent FrameLayout's OnTouchListener from ever firing. By overriding
+ * onInterceptTouchEvent we can steal drag gestures while still forwarding taps to the WebView.
+ */
+class DraggableFrameLayout(context: Context) : FrameLayout(context) {
+
+    var onDrag: ((dx: Float, dy: Float) -> Unit)? = null
+    var onTap: (() -> Unit)? = null
+    var onLongPress: (() -> Unit)? = null
+
+    private var startX = 0f
+    private var startY = 0f
+    private var dragging = false
+    private val slop = ViewConfiguration.get(context).scaledTouchSlop
+    private val longPressTimeout = ViewConfiguration.getLongPressTimeout().toLong()
+    private val handler = Handler(Looper.getMainLooper())
+
+    private val longPressRunnable = Runnable { onLongPress?.invoke() }
+
+    override fun onInterceptTouchEvent(ev: MotionEvent): Boolean {
+        when (ev.actionMasked) {
+            MotionEvent.ACTION_DOWN -> {
+                startX = ev.rawX
+                startY = ev.rawY
+                dragging = false
+                handler.postDelayed(longPressRunnable, longPressTimeout)
+            }
+            MotionEvent.ACTION_MOVE -> {
+                val dx = abs(ev.rawX - startX)
+                val dy = abs(ev.rawY - startY)
+                if (dx > slop || dy > slop) {
+                    dragging = true
+                    handler.removeCallbacks(longPressRunnable)
+                    return true // intercept — steal from WebView
+                }
+            }
+            MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
+                handler.removeCallbacks(longPressRunnable)
+                if (!dragging) {
+                    // tap — let WebView handle it
+                }
+            }
+        }
+        return false // don't intercept taps
+    }
+
+    @SuppressLint("ClickableViewAccessibility")
+    override fun onTouchEvent(ev: MotionEvent): Boolean {
+        when (ev.actionMasked) {
+            MotionEvent.ACTION_DOWN -> {
+                startX = ev.rawX
+                startY = ev.rawY
+            }
+            MotionEvent.ACTION_MOVE -> {
+                val dx = ev.rawX - startX
+                val dy = ev.rawY - startY
+                startX = ev.rawX
+                startY = ev.rawY
+                onDrag?.invoke(dx, dy)
+            }
+            MotionEvent.ACTION_UP -> {
+                if (!dragging) onTap?.invoke()
+            }
+        }
+        return true
+    }
+}
+
+class OverlayService : Service() {
+
+    private lateinit var windowManager: WindowManager
+    private lateinit var overlayView: DraggableFrameLayout
+    private lateinit var webView: WebView
+    private lateinit var fallbackIcon: android.widget.ImageView
+    private lateinit var errorTextView: TextView
+    private lateinit var ringIndicatorView: RingIndicatorView
+    private lateinit var layoutParams: WindowManager.LayoutParams
+    private val mainHandler = Handler(Looper.getMainLooper())
+    private val bridge = AriaNativeBridge(this)
+
+    private var voiceService: com.soltini.app.services.BackgroundVoiceService? = null
+    private var isBound = false
+
+    private val connection = object : android.content.ServiceConnection {
+        override fun onServiceConnected(className: android.content.ComponentName, service: IBinder) {
+            val binder = service as com.soltini.app.services.BackgroundVoiceService.LocalBinder
+            voiceService = binder.getService()
+            isBound = true
+        }
+        override fun onServiceDisconnected(arg0: android.content.ComponentName) {
+            isBound = false
+            voiceService = null
+        }
+    }
+
+    companion object {
+        const val CHANNEL_ID = "AriaOverlayChannel"
+        const val NOTIFICATION_ID = 1001
+        const val ACTION_STOP = "com.soltini.app.STOP_OVERLAY"
+
+        @SuppressLint("StaticFieldLeak")
+        private var instance: OverlayService? = null
+
+        fun getInstance(): OverlayService? = instance
+
+        fun start(context: Context) {
+            val intent = Intent(context, OverlayService::class.java)
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                context.startForegroundService(intent)
+            } else {
+                context.startService(intent)
+            }
+        }
+
+        fun stop(context: Context) {
+            val intent = Intent(context, OverlayService::class.java)
+            context.stopService(intent)
+        }
+    }
+
+    override fun onCreate() {
+        super.onCreate()
+        instance = this
+        createNotificationChannel()
+        startForeground(NOTIFICATION_ID, createNotification())
+
+        Intent(this, com.soltini.app.services.BackgroundVoiceService::class.java).also { intent ->
+            bindService(intent, connection, Context.BIND_AUTO_CREATE)
+        }
+
+        // Safety check: only add overlay if permission is granted
+        if (Settings.canDrawOverlays(this)) {
+            setupOverlay()
+        } else {
+            android.util.Log.e("OverlayService", "SYSTEM_ALERT_WINDOW permission not granted — overlay skipped")
+            stopSelf()
+        }
+    }
+
+    override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        if (intent?.action == ACTION_STOP) {
+            stopSelf()
+            return START_NOT_STICKY
+        }
+        return START_STICKY
+    }
+
+    @SuppressLint("SetJavaScriptEnabled")
+    private fun setupOverlay() {
+        windowManager = getSystemService(Context.WINDOW_SERVICE) as WindowManager
+
+        // Use our custom DraggableFrameLayout instead of plain FrameLayout
+        overlayView = DraggableFrameLayout(this)
+
+        // ── WebView setup ────────────────────────────────────────────────────────
+        webView = WebView(this).apply {
+            settings.apply {
+                javaScriptEnabled = true
+                allowFileAccess = true
+                @Suppress("DEPRECATION")
+                allowFileAccessFromFileURLs = true
+                @Suppress("DEPRECATION")
+                allowUniversalAccessFromFileURLs = true
+                domStorageEnabled = true
+                // Enable hardware acceleration for Three.js / WebGL
+                setRenderPriority(WebSettings.RenderPriority.HIGH)
+                cacheMode = WebSettings.LOAD_NO_CACHE
+                mediaPlaybackRequiresUserGesture = false
+            }
+            setBackgroundColor(Color.TRANSPARENT)
+            setLayerType(View.LAYER_TYPE_HARDWARE, null)
+            visibility = View.GONE // Disabled 3D display as per user request to avoid errors
+            addJavascriptInterface(bridge, "AriaNative")
+            // WebViewClient to suppress error pages
+            webViewClient = object : WebViewClient() {
+                override fun onPageFinished(view: WebView?, url: String?) {
+                    super.onPageFinished(view, url)
+                    android.util.Log.d("OverlayService", "WebView page finished: $url")
+                }
+                override fun onReceivedError(
+                    view: WebView?,
+                    request: android.webkit.WebResourceRequest?,
+                    error: android.webkit.WebResourceError?
+                ) {
+                    android.util.Log.e("OverlayService", "WebView error: ${error?.description} for ${request?.url}")
+                }
+            }
+            loadUrl("file:///android_asset/avatar/index.html")
+        }
+
+        // ── Ring indicator ────────────────────────────────────────────────────
+        ringIndicatorView = RingIndicatorView(this)
+
+        // ── Fallback icon (hidden once model loads) ───────────────────────────
+        fallbackIcon = android.widget.ImageView(this).apply {
+            setImageResource(android.R.drawable.sym_def_app_icon)
+            visibility = View.VISIBLE
+        }
+
+        // ── Error TextView ────────────────────────────────────────────────────
+        errorTextView = TextView(this).apply {
+            visibility = View.GONE
+            setTextColor(Color.RED)
+            setBackgroundColor(Color.parseColor("#CC000000"))
+            textSize = 10f
+            setPadding(8, 8, 8, 8)
+        }
+
+
+        // Add children
+        overlayView.addView(webView, FrameLayout.LayoutParams(
+            FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT
+        ))
+        val fallbackParams = FrameLayout.LayoutParams(
+            FrameLayout.LayoutParams.WRAP_CONTENT, FrameLayout.LayoutParams.WRAP_CONTENT
+        ).apply { gravity = Gravity.CENTER }
+        overlayView.addView(fallbackIcon, fallbackParams)
+
+        val ringMargin = (8 * resources.displayMetrics.density).toInt()
+        val ringParams = FrameLayout.LayoutParams(
+            FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT
+        ).apply { setMargins(ringMargin, ringMargin, ringMargin, ringMargin) }
+        overlayView.addView(ringIndicatorView, ringParams)
+
+        val errorParams = FrameLayout.LayoutParams(
+            FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.WRAP_CONTENT
+        ).apply { gravity = Gravity.BOTTOM }
+        overlayView.addView(errorTextView, errorParams)
+
+        // ── Window layout params ──────────────────────────────────────────────
+        val widthPx  = (140 * resources.displayMetrics.density).toInt()
+        val heightPx = (180 * resources.displayMetrics.density).toInt()
+
+        layoutParams = WindowManager.LayoutParams(
+            widthPx, heightPx,
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O)
+                WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY
+            else
+                @Suppress("DEPRECATION") WindowManager.LayoutParams.TYPE_PHONE,
+            // FLAG_NOT_FOCUSABLE allows touch pass-through to background apps
+            // FLAG_LAYOUT_NO_LIMITS lets it go to screen edges
+            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
+                    WindowManager.LayoutParams.FLAG_HARDWARE_ACCELERATED or
+                    WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
+            PixelFormat.TRANSLUCENT
+        ).apply {
+            gravity = Gravity.TOP or Gravity.START
+            x = 80
+            y = 200
+        }
+
+        // ── Drag callbacks ────────────────────────────────────────────────────
+        overlayView.onDrag = { dx, dy ->
+            layoutParams.x = (layoutParams.x + dx).toInt()
+            layoutParams.y = (layoutParams.y + dy).toInt()
+            try {
+                windowManager.updateViewLayout(overlayView, layoutParams)
+            } catch (e: Exception) {
+                android.util.Log.e("OverlayService", "updateViewLayout failed: ${e.message}")
+            }
+        }
+
+        overlayView.onTap = {
+            onAvatarTapped()
+        }
+
+        overlayView.onLongPress = {
+            // Snap to nearest edge on long press
+            snapToEdge()
+        }
+
+        // ── Add to window ─────────────────────────────────────────────────────
+        try {
+            windowManager.addView(overlayView, layoutParams)
+        } catch (e: Exception) {
+            android.util.Log.e("OverlayService", "addView failed: ${e.message}")
+            stopSelf()
+        }
+    }
+
+    fun onModelReady() {
+        mainHandler.post {
+            fallbackIcon.visibility = View.GONE
+        }
+    }
+
+    fun showError(errorText: String) {
+        mainHandler.post {
+            errorTextView.visibility = View.VISIBLE
+            errorTextView.text = errorText
+            // Auto hide after 10 seconds unless it's a persistent crash
+            mainHandler.postDelayed({
+                if (errorTextView.text == errorText) {
+                    errorTextView.visibility = View.GONE
+                }
+            }, 10000)
+        }
+    }
+
+    fun onAvatarTapped() {
+        val state = voiceService?.connectionState?.value
+        if (state == com.soltini.app.network.ConnectionState.Disconnected || state == com.soltini.app.network.ConnectionState.Error) {
+            voiceService?.connect()
+            setRingState(RingState.THINKING)
+        } else if (state == com.soltini.app.network.ConnectionState.Live) {
+            voiceService?.disconnect()
+            setRingState(RingState.IDLE)
+        }
+        android.util.Log.d("OverlayService", "Avatar tapped. Connection state: $state")
+    }
+
+    private fun snapToEdge() {
+        val screenWidth = resources.displayMetrics.widthPixels
+        val margin = (16 * resources.displayMetrics.density).toInt()
+        val centerX = layoutParams.x + (layoutParams.width / 2)
+        layoutParams.x = if (centerX < screenWidth / 2) margin else screenWidth - layoutParams.width - margin
+        try {
+            windowManager.updateViewLayout(overlayView, layoutParams)
+        } catch (e: Exception) { /* ignore */ }
+    }
+
+    private fun createNotificationChannel() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            val channel = NotificationChannel(
+                CHANNEL_ID, "Aria Overlay Service", NotificationManager.IMPORTANCE_LOW
+            )
+            val manager = getSystemService(NotificationManager::class.java)
+            manager?.createNotificationChannel(channel)
+        }
+    }
+
+    private fun createNotification(): android.app.Notification {
+        val mainIntent = Intent(this, MainActivity::class.java)
+        val pendingIntent = PendingIntent.getActivity(
+            this, 0, mainIntent, PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+        )
+        val stopIntent = Intent(this, OverlayService::class.java).apply { action = ACTION_STOP }
+        val stopPendingIntent = PendingIntent.getService(
+            this, 1, stopIntent, PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+        )
+        return NotificationCompat.Builder(this, CHANNEL_ID)
+            .setContentTitle("Soltini")
+            .setContentText("Soltini is running")
+            .setSmallIcon(android.R.drawable.ic_dialog_info)
+            .setContentIntent(pendingIntent)
+            .addAction(android.R.drawable.ic_menu_close_clear_cancel, "Stop", stopPendingIntent)
+            .setPriority(NotificationCompat.PRIORITY_LOW)
+            .build()
+    }
+
+    fun setRingState(state: RingState) {
+        mainHandler.post { ringIndicatorView.state = state }
+    }
+
+    fun setTalking(isTalking: Boolean) {
+        mainHandler.post {
+            webView.evaluateJavascript(
+                "window.Aria && window.Aria.setTalking && window.Aria.setTalking($isTalking)", null
+            )
+        }
+    }
+
+    fun setMouthAmplitude(value: Float) {
+        mainHandler.post {
+            webView.evaluateJavascript(
+                "window.Aria && window.Aria.setMouthAmplitude && window.Aria.setMouthAmplitude($value)", null
+            )
+        }
+    }
+
+    fun setEmotion(tag: String) {
+        mainHandler.post {
+            webView.evaluateJavascript(
+                "window.Aria && window.Aria.setEmotion && window.Aria.setEmotion('$tag')", null
+            )
+        }
+    }
+
+    fun setListening(isListening: Boolean) {
+        mainHandler.post {
+            webView.evaluateJavascript(
+                "window.Aria && window.Aria.setListening && window.Aria.setListening($isListening)", null
+            )
+        }
+    }
+
+    override fun onDestroy() {
+        super.onDestroy()
+        instance = null
+        if (::windowManager.isInitialized && ::overlayView.isInitialized) {
+            try { windowManager.removeView(overlayView) } catch (e: Exception) { /* ignore */ }
+        }
+        if (isBound) {
+            unbindService(connection)
+            isBound = false
+        }
+    }
+
+    override fun onBind(intent: Intent?): IBinder? = null
+}

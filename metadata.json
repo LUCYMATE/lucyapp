@@ -1,0 +1,6 @@
+{
+  "name": "Gemini Voice Live",
+  "description": "Real-time full-duplex two-way voice conversation app powered by Gemini Live API.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
