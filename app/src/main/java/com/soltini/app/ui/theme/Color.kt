@@ -2,16 +2,21 @@ package com.soltini.app.ui.theme
 
 import androidx.compose.ui.graphics.Color
 
-val LightBackground = Color(0xFFFDFBFF) // Clean Polish Light Canvas
-val LightSurface = Color(0xFFFFFFFF)    // Card / Sheet Surface
-val LightSurfaceVariant = Color(0xFFF1F3F9) // Secondary Container Surface
-val LightBorder = Color(0xFFE1E2EC)     // Subtle Card & Badge Borders
+val DarkBackground = Color(0xFF09090B) // Deep Space Black
+val DarkSurface = Color(0xFF18181B)    // Translucent Surface / Cards
+val DarkSurfaceVariant = Color(0xFF27272A) // Elevated Surfaces
+val DarkBorder = Color(0xFF3F3F46)     // Subtle Dividers
 
-val BluePrimary = Color(0xFF0061A4)     // Professional Brand Blue
-val BlueSecondary = Color(0xFFD1E4FF)   // Soft Accent Container
-val GreenLive = Color(0xFF34A853)       // Google Live Green
-val AmberConnecting = Color(0xFFE37400) // Connecting Amber
-val RedError = Color(0xFFBA1A1A)        // Material Red Call End / Error
+// Orb Accent Colors (Siri-like)
+val AccentTeal = Color(0xFF34D399)     // Listening Accent
+val AccentBlue = Color(0xFF3B82F6)     // Connecting/Base Accent
+val AccentPink = Color(0xFFF472B6)     // Speaking Accent
+val AccentPurple = Color(0xFF8B5CF6)   // Thinking Accent
+val AccentIndigo = Color(0xFF818CF8)   // AI Gradient Base
 
-val TextPrimary = Color(0xFF1A1C1E)     // Dark High Contrast Text
-val TextSecondary = Color(0xFF44474E)   // Muted Secondary Text
+val TextPrimary = Color(0xFFFAFAFA)    // Bright White
+val TextSecondary = Color(0xFFA1A1AA)  // Muted Zinc
+
+val RedError = Color(0xFFEF4444)       // Mute / Disconnect
+val GreenLive = Color(0xFF10B981)      // Live Indicator
+val AmberConnecting = Color(0xFFF59E0B) // Loading/Reconnecting

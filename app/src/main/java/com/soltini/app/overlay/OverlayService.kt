@@ -107,7 +107,6 @@ class OverlayService : Service() {
     private lateinit var windowManager: WindowManager
     private lateinit var overlayView: DraggableFrameLayout
     private lateinit var webView: WebView
-    private lateinit var fallbackIcon: android.widget.ImageView
     private lateinit var errorTextView: TextView
     private lateinit var ringIndicatorView: RingIndicatorView
     private lateinit var layoutParams: WindowManager.LayoutParams
@@ -227,11 +226,7 @@ class OverlayService : Service() {
         // ── Ring indicator ────────────────────────────────────────────────────
         ringIndicatorView = RingIndicatorView(this)
 
-        // ── Fallback icon (hidden once model loads) ───────────────────────────
-        fallbackIcon = android.widget.ImageView(this).apply {
-            setImageResource(android.R.drawable.sym_def_app_icon)
-            visibility = View.VISIBLE
-        }
+        // ── Fallback removed (using RingIndicatorView as primary orb) ──
 
         // ── Error TextView ────────────────────────────────────────────────────
         errorTextView = TextView(this).apply {
@@ -247,10 +242,6 @@ class OverlayService : Service() {
         overlayView.addView(webView, FrameLayout.LayoutParams(
             FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT
         ))
-        val fallbackParams = FrameLayout.LayoutParams(
-            FrameLayout.LayoutParams.WRAP_CONTENT, FrameLayout.LayoutParams.WRAP_CONTENT
-        ).apply { gravity = Gravity.CENTER }
-        overlayView.addView(fallbackIcon, fallbackParams)
 
         val ringMargin = (8 * resources.displayMetrics.density).toInt()
         val ringParams = FrameLayout.LayoutParams(
@@ -264,8 +255,8 @@ class OverlayService : Service() {
         overlayView.addView(errorTextView, errorParams)
 
         // ── Window layout params ──────────────────────────────────────────────
-        val widthPx  = (140 * resources.displayMetrics.density).toInt()
-        val heightPx = (180 * resources.displayMetrics.density).toInt()
+        val widthPx  = (120 * resources.displayMetrics.density).toInt()
+        val heightPx = (120 * resources.displayMetrics.density).toInt()
 
         layoutParams = WindowManager.LayoutParams(
             widthPx, heightPx,
@@ -280,15 +271,16 @@ class OverlayService : Service() {
                     WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
             PixelFormat.TRANSLUCENT
         ).apply {
-            gravity = Gravity.TOP or Gravity.START
-            x = 80
-            y = 200
+            val screenWidth = resources.displayMetrics.widthPixels
+            gravity = Gravity.BOTTOM or Gravity.START
+            x = (screenWidth / 2) - (widthPx / 2)
+            y = (60 * resources.displayMetrics.density).toInt() // margin from bottom
         }
 
         // ── Drag callbacks ────────────────────────────────────────────────────
         overlayView.onDrag = { dx, dy ->
             layoutParams.x = (layoutParams.x + dx).toInt()
-            layoutParams.y = (layoutParams.y + dy).toInt()
+            layoutParams.y = (layoutParams.y - dy).toInt() // Inverted because y is from BOTTOM
             try {
                 windowManager.updateViewLayout(overlayView, layoutParams)
             } catch (e: Exception) {
@@ -316,7 +308,7 @@ class OverlayService : Service() {
 
     fun onModelReady() {
         mainHandler.post {
-            fallbackIcon.visibility = View.GONE
+            // Nothing to hide anymore, orb stays visible
         }
     }
 
@@ -334,15 +326,8 @@ class OverlayService : Service() {
     }
 
     fun onAvatarTapped() {
-        val state = voiceService?.connectionState?.value
-        if (state == com.soltini.app.network.ConnectionState.Disconnected || state == com.soltini.app.network.ConnectionState.Error) {
-            voiceService?.connect()
-            setRingState(RingState.THINKING)
-        } else if (state == com.soltini.app.network.ConnectionState.Live) {
-            voiceService?.disconnect()
-            setRingState(RingState.IDLE)
-        }
-        android.util.Log.d("OverlayService", "Avatar tapped. Connection state: $state")
+        // Tapping the orb no longer toggles the connection to prevent webhook issues.
+        android.util.Log.d("OverlayService", "Avatar tapped (connection toggle removed).")
     }
 
     private fun snapToEdge() {
@@ -398,6 +383,7 @@ class OverlayService : Service() {
 
     fun setMouthAmplitude(value: Float) {
         mainHandler.post {
+            ringIndicatorView.amplitude = value
             webView.evaluateJavascript(
                 "window.Aria && window.Aria.setMouthAmplitude && window.Aria.setMouthAmplitude($value)", null
             )

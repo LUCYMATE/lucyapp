@@ -3,10 +3,12 @@ package com.soltini.app.services
 import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.Service
+import android.content.Context
 import android.content.Intent
 import android.os.Binder
 import android.os.Build
 import android.os.IBinder
+import android.os.PowerManager
 import android.util.Log
 import androidx.core.app.NotificationCompat
 import com.soltini.app.audio.AudioPlayer
@@ -33,6 +35,7 @@ class BackgroundVoiceService : Service(), GeminiLiveListener {
     }
 
     private val binder = LocalBinder()
+    private var wakeLock: PowerManager.WakeLock? = null
     private val serviceScope = CoroutineScope(Dispatchers.Main + Job())
 
     private val audioPlayer = AudioPlayer()
@@ -63,6 +66,10 @@ class BackgroundVoiceService : Service(), GeminiLiveListener {
     override fun onCreate() {
         super.onCreate()
 
+        val powerManager = getSystemService(Context.POWER_SERVICE) as PowerManager
+        wakeLock = powerManager.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "Soltini::VoiceWakeLock")
+        wakeLock?.acquire()
+
         audioRecorder = AudioRecorder(
             onAudioChunkCaptured = { pcmChunk ->
                 geminiLiveManager.sendAudioChunk(pcmChunk)
@@ -87,9 +94,11 @@ class BackgroundVoiceService : Service(), GeminiLiveListener {
                             audioRecorder.startRecording()
                         }
                         audioPlayer.start()
+                        OverlayService.getInstance()?.setRingState(com.soltini.app.overlay.RingState.LISTENING)
                     }
                     ConnectionState.Disconnected, ConnectionState.Error -> {
                         audioRecorder.stopRecording()
+                        OverlayService.getInstance()?.setRingState(com.soltini.app.overlay.RingState.IDLE)
                     }
                     else -> {}
                 }
@@ -105,6 +114,24 @@ class BackgroundVoiceService : Service(), GeminiLiveListener {
         serviceScope.launch {
             isSpeaking.collect { isSpeaking ->
                 OverlayService.getInstance()?.setTalking(isSpeaking)
+                if (connectionState.value == ConnectionState.Live) {
+                    if (isSpeaking) {
+                        OverlayService.getInstance()?.setRingState(com.soltini.app.overlay.RingState.SPEAKING)
+                    } else {
+                        OverlayService.getInstance()?.setRingState(com.soltini.app.overlay.RingState.LISTENING)
+                    }
+                }
+            }
+        }
+
+        // Auto-connect if restarted by system (e.g. after swipe from recents)
+        if (androidx.core.content.ContextCompat.checkSelfPermission(
+                this, 
+                android.Manifest.permission.RECORD_AUDIO
+            ) == android.content.pm.PackageManager.PERMISSION_GRANTED) {
+            _hasMicPermission.value = true
+            if (connectionState.value == ConnectionState.Disconnected) {
+                connect()
             }
         }
     }
@@ -184,6 +211,11 @@ class BackgroundVoiceService : Service(), GeminiLiveListener {
 
     override fun onDestroy() {
         super.onDestroy()
+        
+        wakeLock?.let {
+            if (it.isHeld) it.release()
+        }
+        
         audioRecorder.stopRecording()
         audioPlayer.stop()
         geminiLiveManager.disconnect()

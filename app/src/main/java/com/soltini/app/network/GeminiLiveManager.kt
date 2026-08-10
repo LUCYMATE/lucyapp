@@ -181,7 +181,7 @@ class GeminiLiveManager(
                         put("speechConfig", JSONObject().apply {
                             put("voiceConfig", JSONObject().apply {
                                 put("prebuiltVoiceConfig", JSONObject().apply {
-                                    put("voiceName", "Puck")
+                                    put("voiceName", "Aoede")
                                 })
                             })
                         })
@@ -189,7 +189,7 @@ class GeminiLiveManager(
                     put("systemInstruction", JSONObject().apply {
                         put("parts", JSONArray().apply {
                             put(JSONObject().apply {
-                                put("text", "You are an intelligent, natural, and concise voice AI assistant engaging in a live two-way conversation.")
+                                put("text", "You are a polite, slightly flirty, and highly proper AI assistant. Speak with elegance, charm, and a touch of playful flirtation, but always remain respectful and helpful. Speak with a natural South Asian (Nepali) accent. Keep responses concise for live voice conversation.")
                             })
                         })
                     })
@@ -261,27 +261,42 @@ class GeminiLiveManager(
         }
     }
 
+    private val pendingChunks = mutableListOf<ByteArray>()
+
     /**
      * Sends user microphone audio chunk (16kHz PCM 16-bit) as realtimeInput.
      */
     fun sendAudioChunk(pcmChunk: ByteArray) {
         if (!isSetupComplete) {
+            if (pendingChunks.size < 200) { // Limit buffer to ~200 chunks to prevent memory issues if setup never completes
+                pendingChunks.add(pcmChunk)
+            }
             droppedChunksCount++
             if (droppedChunksCount % 50 == 1) {
-                AppLogger.w(TAG, "Chunk captured, gate open: isSetupComplete=$isSetupComplete (dropped $droppedChunksCount chunks waiting for setupComplete)")
+                AppLogger.w(TAG, "Chunk captured, gate open: isSetupComplete=$isSetupComplete (buffered $droppedChunksCount chunks waiting for setupComplete)")
             }
             return
         }
         if (_connectionState.value != ConnectionState.Live) {
-            AppLogger.w(TAG, "Chunk captured, gate open: isSetupComplete=$isSetupComplete, state=${_connectionState.value} (dropped chunk)")
             return
         }
 
-        val ws = webSocket ?: return
+        // Flush pending chunks first
+        if (pendingChunks.isNotEmpty()) {
+            val chunksToFlush = pendingChunks.toList()
+            pendingChunks.clear()
+            for (chunk in chunksToFlush) {
+                sendToWs(chunk)
+            }
+        }
 
+        sendToWs(pcmChunk)
+    }
+
+    private fun sendToWs(pcmChunk: ByteArray) {
+        val ws = webSocket ?: return
         try {
             val base64Audio = Base64.encodeToString(pcmChunk, Base64.NO_WRAP)
-
             val message = JSONObject().apply {
                 put("realtimeInput", JSONObject().apply {
                     put("audio", JSONObject().apply {
@@ -290,7 +305,6 @@ class GeminiLiveManager(
                     })
                 })
             }
-
             ws.send(message.toString())
             audioChunksSentCount++
             if (audioChunksSentCount % 50 == 1) {

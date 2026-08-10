@@ -49,11 +49,11 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
-import com.soltini.app.ui.theme.BluePrimary
-import com.soltini.app.ui.theme.LightBackground
-import com.soltini.app.ui.theme.LightBorder
-import com.soltini.app.ui.theme.LightSurface
-import com.soltini.app.ui.theme.LightSurfaceVariant
+import com.soltini.app.ui.theme.AccentBlue
+import com.soltini.app.ui.theme.DarkBackground
+import com.soltini.app.ui.theme.DarkBorder
+import com.soltini.app.ui.theme.DarkSurface
+import com.soltini.app.ui.theme.DarkSurfaceVariant
 import com.soltini.app.ui.theme.RedError
 import com.soltini.app.ui.theme.TextPrimary
 import com.soltini.app.ui.theme.TextSecondary
@@ -79,7 +79,7 @@ fun LogScreen(
         modifier = modifier
             .fillMaxSize()
             .windowInsetsPadding(WindowInsets.safeDrawing),
-        color = LightBackground
+        color = DarkBackground
     ) {
         Column(
             modifier = Modifier
@@ -90,8 +90,8 @@ fun LogScreen(
             Card(
                 modifier = Modifier.fillMaxWidth(),
                 shape = RoundedCornerShape(20.dp),
-                colors = CardDefaults.cardColors(containerColor = LightSurface),
-                border = androidx.compose.foundation.BorderStroke(1.dp, LightBorder)
+                colors = CardDefaults.cardColors(containerColor = DarkSurface),
+                border = androidx.compose.foundation.BorderStroke(1.dp, DarkBorder)
             ) {
                 Row(
                     modifier = Modifier
@@ -101,65 +101,29 @@ fun LogScreen(
                     horizontalArrangement = Arrangement.SpaceBetween
                 ) {
                     Row(verticalAlignment = Alignment.CenterVertically) {
-                        IconButton(
-                            onClick = onBack,
-                            modifier = Modifier.testTag("log_back_button")
-                        ) {
-                            Icon(
-                                imageVector = Icons.AutoMirrored.Filled.ArrowBack,
-                                contentDescription = "Back",
-                                tint = TextPrimary
-                            )
+                        IconButton(onClick = onBack) {
+                            Icon(Icons.AutoMirrored.Filled.ArrowBack, "Back", tint = TextPrimary)
                         }
                         Spacer(modifier = Modifier.width(8.dp))
                         Column {
-                            Text(
-                                text = "System & Network Logs",
-                                style = MaterialTheme.typography.titleMedium,
-                                color = TextPrimary,
-                                fontWeight = FontWeight.Bold
-                            )
-                            Text(
-                                text = "${logs.size} entries recorded",
-                                style = MaterialTheme.typography.bodySmall,
-                                color = TextSecondary
-                            )
+                            Text("System & Network Logs", style = MaterialTheme.typography.titleMedium, color = TextPrimary, fontWeight = FontWeight.Bold)
+                            Text("${logs.size} entries recorded", style = MaterialTheme.typography.bodySmall, color = TextSecondary)
                         }
                     }
 
                     Row(verticalAlignment = Alignment.CenterVertically) {
-                        // Copy All Logs Button
-                        IconButton(
-                            onClick = {
-                                val success = AppLogger.copyToClipboard(context)
-                                Toast.makeText(
-                                    context,
-                                    if (success) "Logs copied to clipboard!" else "Failed to copy logs",
-                                    Toast.LENGTH_SHORT
-                                ).show()
-                            },
-                            modifier = Modifier.testTag("copy_logs_button")
-                        ) {
-                            Icon(
-                                imageVector = Icons.Default.ContentCopy,
-                                contentDescription = "Copy Logs",
-                                tint = BluePrimary
-                            )
+                        IconButton(onClick = {
+                            val success = AppLogger.copyToClipboard(context)
+                            Toast.makeText(context, if (success) "Logs copied!" else "Failed", Toast.LENGTH_SHORT).show()
+                        }) {
+                            Icon(Icons.Default.ContentCopy, "Copy Logs", tint = AccentBlue)
                         }
 
-                        // Clear Logs Button
-                        IconButton(
-                            onClick = {
-                                AppLogger.clear()
-                                Toast.makeText(context, "Logs cleared", Toast.LENGTH_SHORT).show()
-                            },
-                            modifier = Modifier.testTag("clear_logs_button")
-                        ) {
-                            Icon(
-                                imageVector = Icons.Default.Delete,
-                                contentDescription = "Clear Logs",
-                                tint = RedError
-                            )
+                        IconButton(onClick = {
+                            AppLogger.clear()
+                            Toast.makeText(context, "Logs cleared", Toast.LENGTH_SHORT).show()
+                        }) {
+                            Icon(Icons.Default.Delete, "Clear Logs", tint = RedError)
                         }
                     }
                 }
@@ -172,8 +136,8 @@ fun LogScreen(
                 modifier = Modifier
                     .fillMaxWidth()
                     .clip(RoundedCornerShape(12.dp))
-                    .background(LightSurfaceVariant)
-                    .border(1.dp, LightBorder, RoundedCornerShape(12.dp))
+                    .background(DarkSurfaceVariant)
+                    .border(1.dp, DarkBorder, RoundedCornerShape(12.dp))
                     .padding(10.dp)
             ) {
                 Text(
@@ -192,19 +156,12 @@ fun LogScreen(
                     .weight(1f)
                     .fillMaxWidth(),
                 shape = RoundedCornerShape(16.dp),
-                colors = CardDefaults.cardColors(containerColor = LightSurface),
-                border = androidx.compose.foundation.BorderStroke(1.dp, LightBorder)
+                colors = CardDefaults.cardColors(containerColor = DarkSurface),
+                border = androidx.compose.foundation.BorderStroke(1.dp, DarkBorder)
             ) {
                 if (logs.isEmpty()) {
-                    Box(
-                        modifier = Modifier.fillMaxSize(),
-                        contentAlignment = Alignment.Center
-                    ) {
-                        Text(
-                            text = "No logs recorded yet.",
-                            style = MaterialTheme.typography.bodyMedium,
-                            color = TextSecondary
-                        )
+                    Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                        Text("No logs recorded yet.", style = MaterialTheme.typography.bodyMedium, color = TextSecondary)
                     }
                 } else {
                     SelectionContainer {
@@ -230,17 +187,17 @@ fun LogScreen(
 private fun LogItemCard(entry: LogEntry) {
     val levelColor = when (entry.level) {
         "ERROR" -> RedError
-        "WARN" -> Color(0xFFD97706)
-        "INFO" -> BluePrimary
-        else -> Color(0xFF6B7280)
+        "WARN" -> Color(0xFFF59E0B) // Amber
+        "INFO" -> AccentBlue
+        else -> Color(0xFFA1A1AA) // Zinc
     }
 
     Box(
         modifier = Modifier
             .fillMaxWidth()
             .clip(RoundedCornerShape(8.dp))
-            .background(LightSurfaceVariant)
-            .border(0.5.dp, LightBorder, RoundedCornerShape(8.dp))
+            .background(DarkSurfaceVariant)
+            .border(0.5.dp, DarkBorder, RoundedCornerShape(8.dp))
             .padding(8.dp)
     ) {
         Column {
@@ -256,30 +213,13 @@ private fun LogItemCard(entry: LogEntry) {
                             .background(levelColor.copy(alpha = 0.15f))
                             .padding(horizontal = 6.dp, vertical = 2.dp)
                     ) {
-                        Text(
-                            text = entry.level,
-                            color = levelColor,
-                            fontSize = 10.sp,
-                            fontWeight = FontWeight.Bold
-                        )
+                        Text(entry.level, color = levelColor, fontSize = 10.sp, fontWeight = FontWeight.Bold)
                     }
                     Spacer(modifier = Modifier.width(8.dp))
-                    Text(
-                        text = entry.tag,
-                        style = MaterialTheme.typography.labelSmall,
-                        color = TextPrimary,
-                        fontWeight = FontWeight.Bold,
-                        fontSize = 11.sp
-                    )
+                    Text(entry.tag, style = MaterialTheme.typography.labelSmall, color = TextPrimary, fontWeight = FontWeight.Bold, fontSize = 11.sp)
                 }
 
-                Text(
-                    text = entry.timestamp,
-                    style = MaterialTheme.typography.labelSmall,
-                    color = TextSecondary,
-                    fontSize = 10.sp,
-                    fontFamily = FontFamily.Monospace
-                )
+                Text(entry.timestamp, style = MaterialTheme.typography.labelSmall, color = TextSecondary, fontSize = 10.sp, fontFamily = FontFamily.Monospace)
             }
 
             Spacer(modifier = Modifier.height(4.dp))
