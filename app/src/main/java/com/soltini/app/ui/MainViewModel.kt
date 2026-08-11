@@ -59,6 +59,16 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             val binder = service as BackgroundVoiceService.LocalBinder
             voiceService = binder.getService()
             observeService()
+            // Safety net: if START_STICKY restarted the service but the WebSocket is not
+            // yet alive (e.g. still Disconnected after the auto-connect in onCreate),
+            // trigger connect() here so the user always gets a live session when opening the app.
+            viewModelScope.launch {
+                val svc = voiceService ?: return@launch
+                if (!svc.isSleeping.value &&
+                    svc.connectionState.value == ConnectionState.Disconnected) {
+                    svc.connect()
+                }
+            }
         }
         override fun onServiceDisconnected(arg0: ComponentName) {
             voiceService = null
@@ -103,6 +113,17 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     fun clearTranscript() {
         voiceService?.clearTranscript()
     }
+
+    /** Disconnects and reconnects to apply new API key / persona / voice settings. */
+    fun reconnect() {
+        voiceService?.reconnect()
+    }
+
+    /** Gives Settings UI access to user-configurable AI settings. */
+    fun getAppSettings() = voiceService?.appSettings
+
+    /** Gives Settings UI access to the memory store (for viewer + clear button). */
+    fun getMemoryManager() = voiceService?.memoryManager
 
     override fun onCleared() {
         super.onCleared()

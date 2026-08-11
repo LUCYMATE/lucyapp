@@ -1,0 +1,381 @@
+package com.soltini.app.agent
+
+import android.accessibilityservice.AccessibilityService
+import android.accessibilityservice.GestureDescription
+import android.annotation.SuppressLint
+import android.graphics.Path
+import android.graphics.Rect
+import android.os.Build
+import android.os.Bundle
+import android.util.Log
+import android.view.accessibility.AccessibilityEvent
+import android.view.accessibility.AccessibilityNodeInfo
+import android.view.accessibility.AccessibilityWindowInfo
+
+/**
+ * SoltiniAccessibilityService
+ *
+ * Full automation service that gives Soltini the ability to:
+ *
+ *  ┌── Global Actions ──────────────────────────────────────────────────────┐
+ *  │  lockScreen()     — GLOBAL_ACTION_LOCK_SCREEN (Android 9+)            │
+ *  │  pressBack()      — GLOBAL_ACTION_BACK                                │
+ *  │  pressHome()      — GLOBAL_ACTION_HOME                                │
+ *  │  pressRecents()   — GLOBAL_ACTION_RECENTS                             │
+ *  └────────────────────────────────────────────────────────────────────────┘
+ *  ┌── Screen Reading ───────────────────────────────────────────────────────┐
+ *  │  readScreen()     — walks the a11y tree, returns all visible text      │
+ *  │  findNodes(text)  — finds nodes whose text/desc matches a query        │
+ *  └────────────────────────────────────────────────────────────────────────┘
+ *  ┌── Click / Tap ──────────────────────────────────────────────────────────┐
+ *  │  clickByText(text)     — perform ACTION_CLICK on matching node         │
+ *  │  tapAt(x, y)           — dispatch a tap gesture at pixel coords        │
+ *  └────────────────────────────────────────────────────────────────────────┘
+ *  ┌── Typing ───────────────────────────────────────────────────────────────┐
+ *  │  typeText(text)        — ACTION_SET_TEXT on focused / editable node    │
+ *  │  clearText()           — clears the focused input field                │
+ *  └────────────────────────────────────────────────────────────────────────┘
+ *  ┌── Scroll ───────────────────────────────────────────────────────────────┐
+ *  │  scrollDown() / scrollUp() — find first scrollable view and scroll     │
+ *  └────────────────────────────────────────────────────────────────────────┘
+ *
+ * Requires the user to enable this service in:
+ *   Settings → Accessibility → Soltini
+ *
+ * On Android 13+ sideloaded APKs:
+ *   App Info → ⋮ → "Allow restricted settings" must be enabled first.
+ *
+ * ── Stability Design ──────────────────────────────────────────────────────
+ * We deliberately NEVER modify serviceInfo at runtime. Previous code called
+ * serviceInfo = info to toggle event types, which caused Android to treat the
+ * service as unstable and auto-disable it when the app crashed.
+ *
+ * Instead, the XML config subscribes to a fixed minimal set of events and we
+ * use an internal @Volatile flag (isToolCallActive) to gate whether we act on
+ * those events. Zero risk of Android disabling the permission.
+ */
+class SoltiniAccessibilityService : AccessibilityService() {
+
+    companion object {
+        private const val TAG = "SoltiniA11y"
+
+        @SuppressLint("StaticFieldLeak")
+        private var instance: SoltiniAccessibilityService? = null
+
+        fun getInstance(): SoltiniAccessibilityService? = instance
+        fun isActive(): Boolean = instance != null
+    }
+
+    /**
+     * Set to true only while a Gemini tool call is actively executing.
+     * Controls whether onAccessibilityEvent tracks editable nodes.
+     *
+     * @Volatile ensures cross-thread visibility without a full lock.
+     * We NEVER touch serviceInfo — that caused the auto-disable bug.
+     */
+    @Volatile
+    var isToolCallActive: Boolean = false
+        set(value) {
+            field = value
+            Log.i(TAG, "isToolCallActive = $value")
+        }
+
+    // Last focused editable node — updated only when a tool call is active
+    private var lastFocusedEditable: AccessibilityNodeInfo? = null
+
+    override fun onServiceConnected() {
+        super.onServiceConnected()
+        instance = this
+        isToolCallActive = false
+        Log.i(TAG, "Accessibility Service connected — ready for tool calls")
+        // NOTE: We do NOT modify serviceInfo here. The static XML config is the
+        // single source of truth for event subscriptions. Touching serviceInfo
+        // at runtime was the root cause of the auto-disable bug.
+    }
+
+    override fun onAccessibilityEvent(event: AccessibilityEvent?) {
+        event ?: return
+        // Only track focused editable views when a tool call is in progress.
+        // When idle this callback fires but we do nothing — zero friction.
+        if (!isToolCallActive) return
+        if (event.eventType == AccessibilityEvent.TYPE_VIEW_FOCUSED) {
+            val node = event.source
+            if (node != null && node.isEditable) {
+                lastFocusedEditable?.recycle()
+                lastFocusedEditable = AccessibilityNodeInfo.obtain(node)
+            }
+        }
+    }
+
+    override fun onInterrupt() {
+        Log.w(TAG, "Accessibility Service interrupted")
+    }
+
+    override fun onDestroy() {
+        // Clear instance BEFORE super so no in-flight tool call fires against
+        // a destroyed service context.
+        instance = null
+        isToolCallActive = false
+        lastFocusedEditable?.recycle()
+        lastFocusedEditable = null
+        super.onDestroy()
+        Log.i(TAG, "Accessibility Service destroyed")
+    }
+
+    // ─── Global Actions ───────────────────────────────────────────────────────
+
+    fun lockScreen(): Boolean {
+        return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+            performGlobalAction(GLOBAL_ACTION_LOCK_SCREEN)
+        } else {
+            Log.w(TAG, "Lock screen not supported below Android 9")
+            false
+        }
+    }
+
+    fun pressBack(): Boolean = performGlobalAction(GLOBAL_ACTION_BACK)
+
+    fun pressHome(): Boolean = performGlobalAction(GLOBAL_ACTION_HOME)
+
+    fun pressRecents(): Boolean = performGlobalAction(GLOBAL_ACTION_RECENTS)
+
+    // ─── Screen Reading ───────────────────────────────────────────────────────
+
+    /**
+     * Walks the full accessibility tree of all visible windows and collects
+     * all visible text into a structured string.
+     *
+     * Clickable elements include their on-screen center coordinates in the format
+     * @(cx,cy) so Gemini can pass those exact values to tap_screen().
+     * These are SCREEN-ABSOLUTE pixel coordinates (same space as dispatchGesture).
+     *
+     * @return A plain-text representation of the screen content suitable for
+     *         sending to Gemini as a tool response.
+     */
+    fun readScreen(): String {
+        val sb = StringBuilder()
+        try {
+            val windows: List<AccessibilityWindowInfo> = windows ?: emptyList()
+            for (window in windows) {
+                val root = window.root ?: continue
+                collectNodeText(root, sb, depth = 0)
+                root.recycle()
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "readScreen failed: ${e.message}")
+            return "Error reading screen: ${e.message}"
+        }
+        val result = sb.toString().trim()
+        return result.ifEmpty { "Screen appears empty or content is not accessible." }
+    }
+
+    private fun collectNodeText(node: AccessibilityNodeInfo, sb: StringBuilder, depth: Int) {
+        val indent = "  ".repeat(depth.coerceAtMost(8))
+
+        val text = node.text?.toString()?.trim()
+        val desc = node.contentDescription?.toString()?.trim()
+        val hint = node.hintText?.toString()?.trim()
+
+        val displayed = when {
+            !text.isNullOrEmpty() -> text
+            !desc.isNullOrEmpty() -> "[$desc]"
+            !hint.isNullOrEmpty() -> "(hint: $hint)"
+            else -> null
+        }
+
+        if (displayed != null) {
+            // Get the real screen-absolute bounding box for this node.
+            // getBoundsInScreen() returns coordinates in the same space that
+            // dispatchGesture() expects: (0,0) = physical top-left of display,
+            // including the status bar. This is exactly what tap_screen needs.
+            val bounds = Rect()
+            node.getBoundsInScreen(bounds)
+            val cx = bounds.centerX()
+            val cy = bounds.centerY()
+
+            val interactMarker = when {
+                node.isClickable && node.isEditable -> " ✏ tap@($cx,$cy)"
+                node.isClickable                    -> " ◆ tap@($cx,$cy)"
+                node.isEditable                    -> " ✏ tap@($cx,$cy)"
+                else                               -> ""
+            }
+            sb.appendLine("$indent$displayed$interactMarker")
+        }
+
+        for (i in 0 until node.childCount) {
+            val child = node.getChild(i) ?: continue
+            collectNodeText(child, sb, depth + 1)
+            child.recycle()
+        }
+    }
+
+    // ─── Click / Tap ──────────────────────────────────────────────────────────
+
+    fun clickByText(query: String): Boolean {
+        if (query.isBlank()) return false
+        val q = query.lowercase().trim()
+        val windows: List<AccessibilityWindowInfo> = windows ?: return false
+
+        for (window in windows) {
+            val root = window.root ?: continue
+            val match = findNodeByQuery(root, q, requireClickable = true)
+            root.recycle()
+            if (match != null) {
+                val success = match.performAction(AccessibilityNodeInfo.ACTION_CLICK)
+                match.recycle()
+                Log.i(TAG, "clickByText('$query') -> success=$success")
+                return success
+            }
+        }
+        Log.w(TAG, "clickByText('$query') -> no matching node found")
+        return false
+    }
+
+    fun tapAt(x: Float, y: Float): Boolean {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.N) {
+            Log.w(TAG, "tapAt requires Android 7+")
+            return false
+        }
+        return try {
+            // dispatchGesture uses raw screen-absolute coordinates.
+            // These must match what getBoundsInScreen() returns — and they do,
+            // because both use the same (0,0)=physical-top-left coordinate space.
+            Log.i(TAG, "tapAt dispatching gesture at raw screen coords ($x, $y)")
+            val path = Path().apply { moveTo(x, y) }
+            val stroke = GestureDescription.StrokeDescription(path, 0, 50)
+            val gesture = GestureDescription.Builder().addStroke(stroke).build()
+            dispatchGesture(gesture, null, null)
+            true
+        } catch (e: Exception) {
+            Log.e(TAG, "tapAt($x,$y) failed: ${e.message}")
+            false
+        }
+    }
+
+    fun swipe(x1: Float, y1: Float, x2: Float, y2: Float, durationMs: Long = 300): Boolean {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.N) return false
+        return try {
+            val path = Path().apply {
+                moveTo(x1, y1)
+                lineTo(x2, y2)
+            }
+            val stroke = GestureDescription.StrokeDescription(path, 0, durationMs)
+            val gesture = GestureDescription.Builder().addStroke(stroke).build()
+            dispatchGesture(gesture, null, null)
+            true
+        } catch (e: Exception) {
+            Log.e(TAG, "swipe failed: ${e.message}")
+            false
+        }
+    }
+
+    // ─── Typing ───────────────────────────────────────────────────────────────
+
+    fun typeText(text: String): Boolean {
+        val cached = lastFocusedEditable
+        if (cached != null && cached.isEditable) {
+            val success = setTextOnNode(cached, text)
+            if (success) return true
+        }
+
+        val windows: List<AccessibilityWindowInfo> = windows ?: return false
+        for (window in windows) {
+            val root = window.root ?: continue
+            val editable = findFirstEditable(root)
+            root.recycle()
+            if (editable != null) {
+                editable.performAction(AccessibilityNodeInfo.ACTION_ACCESSIBILITY_FOCUS)
+                val success = setTextOnNode(editable, text)
+                editable.recycle()
+                if (success) return true
+            }
+        }
+        Log.w(TAG, "typeText: no editable field found on screen")
+        return false
+    }
+
+    private fun setTextOnNode(node: AccessibilityNodeInfo, text: String): Boolean {
+        val args = Bundle()
+        args.putCharSequence(AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE, text)
+        val success = node.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, args)
+        Log.i(TAG, "setTextOnNode('$text') -> $success")
+        return success
+    }
+
+    fun clearText(): Boolean = typeText("")
+
+    // ─── Scroll ───────────────────────────────────────────────────────────────
+
+    fun scrollDown(): Boolean = scroll(forward = true)
+
+    fun scrollUp(): Boolean = scroll(forward = false)
+
+    private fun scroll(forward: Boolean): Boolean {
+        val action = if (forward)
+            AccessibilityNodeInfo.ACTION_SCROLL_FORWARD
+        else
+            AccessibilityNodeInfo.ACTION_SCROLL_BACKWARD
+
+        val windows: List<AccessibilityWindowInfo> = windows ?: return false
+        for (window in windows) {
+            val root = window.root ?: continue
+            val scrollable = findFirstScrollable(root)
+            root.recycle()
+            if (scrollable != null) {
+                val success = scrollable.performAction(action)
+                scrollable.recycle()
+                Log.i(TAG, "scroll(forward=$forward) -> $success")
+                return success
+            }
+        }
+        Log.w(TAG, "scroll: no scrollable view found")
+        return false
+    }
+
+    // ─── Node Search Helpers ──────────────────────────────────────────────────
+
+    private fun findNodeByQuery(
+        node: AccessibilityNodeInfo,
+        query: String,
+        requireClickable: Boolean
+    ): AccessibilityNodeInfo? {
+        val text = node.text?.toString()?.lowercase() ?: ""
+        val desc = node.contentDescription?.toString()?.lowercase() ?: ""
+        val matches = (text.contains(query) || desc.contains(query))
+        val clickOk = !requireClickable || node.isClickable
+
+        if (matches && clickOk) {
+            return AccessibilityNodeInfo.obtain(node)
+        }
+
+        for (i in 0 until node.childCount) {
+            val child = node.getChild(i) ?: continue
+            val found = findNodeByQuery(child, query, requireClickable)
+            child.recycle()
+            if (found != null) return found
+        }
+        return null
+    }
+
+    private fun findFirstEditable(node: AccessibilityNodeInfo): AccessibilityNodeInfo? {
+        if (node.isEditable) return AccessibilityNodeInfo.obtain(node)
+        for (i in 0 until node.childCount) {
+            val child = node.getChild(i) ?: continue
+            val found = findFirstEditable(child)
+            child.recycle()
+            if (found != null) return found
+        }
+        return null
+    }
+
+    private fun findFirstScrollable(node: AccessibilityNodeInfo): AccessibilityNodeInfo? {
+        if (node.isScrollable) return AccessibilityNodeInfo.obtain(node)
+        for (i in 0 until node.childCount) {
+            val child = node.getChild(i) ?: continue
+            val found = findFirstScrollable(child)
+            child.recycle()
+            if (found != null) return found
+        }
+        return null
+    }
+}

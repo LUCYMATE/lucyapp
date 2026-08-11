@@ -121,6 +121,14 @@ class OverlayService : Service() {
             val binder = service as com.soltini.app.services.BackgroundVoiceService.LocalBinder
             voiceService = binder.getService()
             isBound = true
+            // OverlayService is often the first client to bind after a START_STICKY restart.
+            // If BackgroundVoiceService is running but its WebSocket is still Disconnected,
+            // trigger connect() here so voice is live before the user even opens the app.
+            val svc = voiceService
+            if (svc != null && !svc.isSleeping.value &&
+                svc.connectionState.value == com.soltini.app.network.ConnectionState.Disconnected) {
+                svc.connect()
+            }
         }
         override fun onServiceDisconnected(arg0: android.content.ComponentName) {
             isBound = false
@@ -198,7 +206,6 @@ class OverlayService : Service() {
                 allowUniversalAccessFromFileURLs = true
                 domStorageEnabled = true
                 // Enable hardware acceleration for Three.js / WebGL
-                setRenderPriority(WebSettings.RenderPriority.HIGH)
                 cacheMode = WebSettings.LOAD_NO_CACHE
                 mediaPlaybackRequiresUserGesture = false
             }
@@ -326,8 +333,21 @@ class OverlayService : Service() {
     }
 
     fun onAvatarTapped() {
-        // Tapping the orb no longer toggles the connection to prevent webhook issues.
-        android.util.Log.d("OverlayService", "Avatar tapped (connection toggle removed).")
+        val svc = voiceService
+        if (svc != null) {
+            if (svc.isSleeping.value) {
+                svc.wakeUp()
+                android.util.Log.d("OverlayService", "Avatar tapped — waking up from sleep.")
+            } else if (svc.connectionState.value == com.soltini.app.network.ConnectionState.Disconnected || 
+                       svc.connectionState.value == com.soltini.app.network.ConnectionState.Error) {
+                svc.connect()
+                android.util.Log.d("OverlayService", "Avatar tapped — reconnecting broken connection.")
+            } else {
+                android.util.Log.d("OverlayService", "Avatar tapped — already active, doing nothing.")
+            }
+        } else {
+            android.util.Log.d("OverlayService", "Avatar tapped but BackgroundVoiceService not bound yet.")
+        }
     }
 
     private fun snapToEdge() {

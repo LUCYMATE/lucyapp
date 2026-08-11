@@ -1,3 +1,4 @@
 <resources>
     <string name="app_name">Soltini</string>
+    <string name="accessibility_service_description">Allows Soltini to lock your device screen and perform other system-level actions when you ask via voice. Soltini does not read any screen content.</string>
 </resources>

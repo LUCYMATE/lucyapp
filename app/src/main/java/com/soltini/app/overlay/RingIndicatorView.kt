@@ -11,7 +11,7 @@ import android.view.View
 import android.view.animation.LinearInterpolator
 import kotlin.math.min
 
-enum class RingState { IDLE, LISTENING, SPEAKING, THINKING }
+enum class RingState { IDLE, LISTENING, SPEAKING, THINKING, SLEEPING }
 
 class RingIndicatorView(context: Context) : View(context) {
     private val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
@@ -39,6 +39,22 @@ class RingIndicatorView(context: Context) : View(context) {
                     pulseAlpha = 0.6f 
                     invalidate() 
                 } 
+                RingState.SLEEPING -> {
+                    // Dim grey slow pulse — tap to wake
+                    colorCenter = Color.parseColor("#6B7280") // Grey
+                    colorEdge = Color.parseColor("#374151")   // Dark grey
+                    pulseAnimator = ValueAnimator.ofFloat(0.2f, 0.4f, 0.2f).apply {
+                        duration = 3000
+                        repeatCount = ValueAnimator.INFINITE
+                        interpolator = LinearInterpolator()
+                        addUpdateListener {
+                            pulseAlpha = it.animatedValue as Float
+                            pulseScale = 1f
+                            invalidate()
+                        }
+                        start()
+                    }
+                }
                 RingState.LISTENING -> startPulse(Color.parseColor("#34D399"), Color.parseColor("#3B82F6")) // Teal/Blue
                 RingState.SPEAKING -> startPulse(Color.parseColor("#F472B6"), Color.parseColor("#8B5CF6")) // Pink/Purple
                 RingState.THINKING -> startPulse(Color.parseColor("#818CF8"), Color.parseColor("#A855F7")) // Indigo/Purple

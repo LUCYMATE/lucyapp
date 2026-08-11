@@ -4,6 +4,8 @@ import android.annotation.SuppressLint
 import android.media.AudioFormat
 import android.media.AudioRecord
 import android.media.MediaRecorder
+import android.media.audiofx.AcousticEchoCanceler
+import android.media.audiofx.NoiseSuppressor
 import com.soltini.app.util.AppLogger
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -31,6 +33,9 @@ class AudioRecorder(
     private var audioRecord: AudioRecord? = null
     private var recordingJob: Job? = null
     private var isRecording = false
+
+    private var aec: AcousticEchoCanceler? = null
+    private var ns: NoiseSuppressor? = null
 
     var isMuted = false
 
@@ -76,6 +81,22 @@ class AudioRecorder(
                 return
             }
 
+            // Enable hardware echo cancellation and noise suppression if available
+            try {
+                if (AcousticEchoCanceler.isAvailable()) {
+                    aec = AcousticEchoCanceler.create(audioRecord!!.audioSessionId)
+                    aec?.enabled = true
+                    AppLogger.i(TAG, "AcousticEchoCanceler enabled")
+                }
+                if (NoiseSuppressor.isAvailable()) {
+                    ns = NoiseSuppressor.create(audioRecord!!.audioSessionId)
+                    ns?.enabled = true
+                    AppLogger.i(TAG, "NoiseSuppressor enabled")
+                }
+            } catch (e: Exception) {
+                AppLogger.w(TAG, "Could not apply audio FX: ${e.message}")
+            }
+
             audioRecord?.startRecording()
             isRecording = true
             AppLogger.i(TAG, "AudioRecord started recording at 16000Hz PCM 16-bit")
@@ -83,9 +104,11 @@ class AudioRecorder(
             recordingJob = CoroutineScope(Dispatchers.IO).launch {
                 val buffer = ByteArray(2048)
                 var chunkCount = 0
+                var errorCount = 0
                 while (isRecording) {
                     val bytesRead = audioRecord?.read(buffer, 0, buffer.size) ?: -1
                     if (bytesRead > 0) {
+                        errorCount = 0
                         val chunk = buffer.copyOf(bytesRead)
                         calculateAmplitude(chunk)
 
@@ -98,7 +121,42 @@ class AudioRecorder(
                         }
                     } else if (bytesRead < 0) {
                         AppLogger.e(TAG, "AudioRecord read error code: $bytesRead")
-                        Thread.sleep(20)
+                        errorCount++
+                        Thread.sleep(50)
+                        
+                        // If we get consecutive errors (e.g., another app took the mic), try to restart
+                        if (errorCount > 5) {
+                            AppLogger.w(TAG, "Consecutive audio errors. Attempting to restart microphone...")
+                            try {
+                                audioRecord?.stop()
+                                audioRecord?.release()
+                            } catch (e: Exception) {}
+                            
+                            // Try to re-init
+                            try {
+                                audioRecord = AudioRecord(
+                                    MediaRecorder.AudioSource.VOICE_COMMUNICATION,
+                                    SAMPLE_RATE,
+                                    CHANNEL_CONFIG,
+                                    AUDIO_FORMAT,
+                                    bufferSize
+                                )
+                                if (audioRecord?.state != AudioRecord.STATE_INITIALIZED) {
+                                    audioRecord = AudioRecord(
+                                        MediaRecorder.AudioSource.MIC,
+                                        SAMPLE_RATE,
+                                        CHANNEL_CONFIG,
+                                        AUDIO_FORMAT,
+                                        bufferSize
+                                    )
+                                }
+                                audioRecord?.startRecording()
+                                errorCount = 0
+                                AppLogger.i(TAG, "Microphone restarted successfully")
+                            } catch (e: Exception) {
+                                AppLogger.e(TAG, "Failed to restart microphone: ${e.message}")
+                            }
+                        }
                     }
                 }
             }
@@ -131,10 +189,14 @@ class AudioRecorder(
         try {
             audioRecord?.stop()
             audioRecord?.release()
+            aec?.release()
+            ns?.release()
         } catch (e: Exception) {
             AppLogger.e(TAG, "Error stopping AudioRecord: ${e.message}", e)
         }
         audioRecord = null
+        aec = null
+        ns = null
         _micAmplitude.value = 0f
         AppLogger.i(TAG, "AudioRecord stopped")
     }

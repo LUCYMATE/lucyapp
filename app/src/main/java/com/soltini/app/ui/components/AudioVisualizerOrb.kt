@@ -121,7 +121,7 @@ fun AudioVisualizerOrb(
                     if (i == 0) {
                         path.moveTo(midX, midY)
                     } else {
-                        path.quadraticBezierTo(p1.x, p1.y, midX, midY)
+                        path.quadraticTo(p1.x, p1.y, midX, midY)
                     }
                 }
                 // Close the loop smoothly
@@ -129,7 +129,7 @@ fun AudioVisualizerOrb(
                 val pSecond = vertexes[1]
                 val midFirstX = (pFirst.x + pSecond.x) / 2f
                 val midFirstY = (pFirst.y + pSecond.y) / 2f
-                path.quadraticBezierTo(pFirst.x, pFirst.y, midFirstX, midFirstY)
+                path.quadraticTo(pFirst.x, pFirst.y, midFirstX, midFirstY)
                 path.close()
                 return path
             }
