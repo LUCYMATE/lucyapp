@@ -91,19 +91,37 @@ class SoltiniAccessibilityService : AccessibilityService() {
         // NOTE: We do NOT modify serviceInfo here. The static XML config is the
         // single source of truth for event subscriptions. Touching serviceInfo
         // at runtime was the root cause of the auto-disable bug.
+        
+        // Auto-restart the background voice service if the OS re-binds this accessibility 
+        // service after the app was killed from Recents.
+        try {
+            val serviceIntent = android.content.Intent(this, com.soltini.app.services.BackgroundVoiceService::class.java)
+            if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.O) {
+                startForegroundService(serviceIntent)
+            } else {
+                startService(serviceIntent)
+            }
+            Log.i(TAG, "Accessibility Service successfully started BackgroundVoiceService")
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to start BackgroundVoiceService from AccessibilityService: ${e.message}")
+        }
     }
 
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {
-        event ?: return
-        // Only track focused editable views when a tool call is in progress.
-        // When idle this callback fires but we do nothing — zero friction.
-        if (!isToolCallActive) return
-        if (event.eventType == AccessibilityEvent.TYPE_VIEW_FOCUSED) {
-            val node = event.source
-            if (node != null && node.isEditable) {
-                lastFocusedEditable?.recycle()
-                lastFocusedEditable = AccessibilityNodeInfo.obtain(node)
+        try {
+            event ?: return
+            // Only track focused editable views when a tool call is in progress.
+            // When idle this callback fires but we do nothing — zero friction.
+            if (!isToolCallActive) return
+            if (event.eventType == AccessibilityEvent.TYPE_VIEW_FOCUSED) {
+                val node = event.source
+                if (node != null && node.isEditable) {
+                    lastFocusedEditable?.recycle()
+                    lastFocusedEditable = AccessibilityNodeInfo.obtain(node)
+                }
             }
+        } catch (t: Throwable) {
+            Log.e(TAG, "Suppressed crash in onAccessibilityEvent: ${t.message}")
         }
     }
 

@@ -65,6 +65,11 @@ import androidx.compose.material.icons.filled.Storage
 import androidx.compose.material.icons.filled.Visibility
 import androidx.compose.material.icons.filled.VisibilityOff
 import androidx.compose.material.icons.filled.Warning
+import androidx.compose.material.icons.filled.KeyboardArrowLeft
+import androidx.compose.material.icons.filled.KeyboardArrowRight
+import androidx.compose.material.icons.filled.Security
+import androidx.compose.material.icons.filled.Memory
+import androidx.activity.compose.BackHandler
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
@@ -116,6 +121,27 @@ import com.soltini.app.ui.theme.TextSecondary
 private val AmberWarning = Color(0xFFFFA726)
 private val Purple = Color(0xFF9C27B0)
 
+enum class SettingsRoute { MAIN, PERMISSIONS, API, MEMORY }
+
+@Composable
+fun SettingsMenuCard(title: String, icon: ImageVector, onClick: () -> Unit) {
+    Card(
+        modifier = Modifier.fillMaxWidth().clickable(onClick = onClick),
+        colors = CardDefaults.cardColors(containerColor = DarkSurfaceVariant),
+        shape = RoundedCornerShape(12.dp)
+    ) {
+        Row(
+            modifier = Modifier.padding(16.dp).fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Icon(icon, contentDescription = null, tint = AccentBlue, modifier = Modifier.size(24.dp))
+            Spacer(Modifier.width(16.dp))
+            Text(title, color = TextPrimary, fontSize = 16.sp, fontWeight = FontWeight.Medium, modifier = Modifier.weight(1f))
+            Icon(Icons.Default.KeyboardArrowRight, contentDescription = null, tint = TextSecondary)
+        }
+    }
+}
+
 @Composable
 fun SettingsScreen(
     onBack: () -> Unit,
@@ -125,6 +151,12 @@ fun SettingsScreen(
     val context = LocalContext.current
     val lifecycleOwner = LocalLifecycleOwner.current
     val scrollState = rememberScrollState()
+
+    var currentRoute by remember { mutableStateOf(SettingsRoute.MAIN) }
+
+    BackHandler(enabled = currentRoute != SettingsRoute.MAIN) {
+        currentRoute = SettingsRoute.MAIN
+    }
 
     // --- Permission states ---
     var hasMic by remember { mutableStateOf(SettingsPermChecks.checkMic(context)) }
@@ -180,25 +212,47 @@ fun SettingsScreen(
                 .padding(horizontal = 20.dp, vertical = 24.dp),
             horizontalAlignment = Alignment.CenterHorizontally
         ) {
-            // ── Header ─────────────────────────────────────────────────────
-            SettingsHeader()
+            // ── Top Bar (Back / Done) ──────────────────────────────────────
+            Row(
+                modifier = Modifier.fillMaxWidth().padding(bottom = 8.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Box(modifier = Modifier.clickable { 
+                    if (currentRoute == SettingsRoute.MAIN) onBack() else currentRoute = SettingsRoute.MAIN
+                }.padding(8.dp)) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Icon(Icons.Default.KeyboardArrowLeft, contentDescription = null, tint = AccentBlue)
+                        Spacer(Modifier.width(4.dp))
+                        Text(if (currentRoute == SettingsRoute.MAIN) "Done" else "Back", color = AccentBlue, fontWeight = FontWeight.Medium)
+                    }
+                }
+            }
 
-            Spacer(modifier = Modifier.height(24.dp))
+            if (currentRoute == SettingsRoute.MAIN) {
+                SettingsHeader()
+                Spacer(modifier = Modifier.height(24.dp))
+            }
 
-            // ── Section: AI Configuration (separate from permissions) ────────
-            AiConfigSection(
-                appSettings = viewModel?.getAppSettings(),
-                onSaveAndReconnect = { viewModel?.reconnect() }
-            )
-
-            Spacer(modifier = Modifier.height(20.dp))
-
-            // ── Section: Memory ────────────────────────────────────────
-            MemorySection(
-                memoryManager = viewModel?.getMemoryManager()
-            )
-
-            Spacer(modifier = Modifier.height(20.dp))
+            when (currentRoute) {
+                SettingsRoute.MAIN -> {
+                    SettingsMenuCard("Permissions & Agent", Icons.Default.Security) { currentRoute = SettingsRoute.PERMISSIONS }
+                    Spacer(Modifier.height(16.dp))
+                    SettingsMenuCard("API & Persona", Icons.Default.Person) { currentRoute = SettingsRoute.API }
+                    Spacer(Modifier.height(16.dp))
+                    SettingsMenuCard("Memory System", Icons.Default.Storage) { currentRoute = SettingsRoute.MEMORY }
+                }
+                SettingsRoute.API -> {
+                    AiConfigSection(
+                        appSettings = viewModel?.getAppSettings(),
+                        onSaveAndReconnect = { viewModel?.reconnect() }
+                    )
+                }
+                SettingsRoute.MEMORY -> {
+                    MemorySection(
+                        memoryManager = viewModel?.getMemoryManager()
+                    )
+                }
+                SettingsRoute.PERMISSIONS -> {
 
             // ── Section: Required for Basic Function ────────────────────────
             SectionLabel("Required Permissions")
@@ -347,6 +401,11 @@ fun SettingsScreen(
                 )
             }
 
+            if (Build.MANUFACTURER.equals("Xiaomi", ignoreCase = true) || Build.MANUFACTURER.equals("POCO", ignoreCase = true) || Build.MANUFACTURER.equals("Redmi", ignoreCase = true)) {
+                Spacer(modifier = Modifier.height(10.dp))
+                XiaomiWarningCard()
+            }
+
             Spacer(modifier = Modifier.height(28.dp))
 
             // ── Summary bar ─────────────────────────────────────────────────
@@ -363,19 +422,8 @@ fun SettingsScreen(
             )
 
             Spacer(modifier = Modifier.height(24.dp))
-
-            Button(
-                onClick = onBack,
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .height(54.dp),
-                colors = ButtonDefaults.buttonColors(containerColor = AccentBlue),
-                shape = RoundedCornerShape(16.dp)
-            ) {
-                Text("Done", fontWeight = FontWeight.Bold, fontSize = 16.sp)
-            }
-
-            Spacer(modifier = Modifier.height(16.dp))
+                } // End of PERMISSIONS route
+            } // End of when(currentRoute)
         }
     }
 }
@@ -567,6 +615,42 @@ private fun RestrictedSettingsCard() {
                             "2. Tap the three-dot menu (⋮) at the top right\n" +
                             "3. Tap \"Allow restricted settings\"\n" +
                             "4. Come back and tap Grant on Accessibility Service above.",
+                    color = TextSecondary,
+                    fontSize = 12.sp,
+                    lineHeight = 18.sp
+                )
+            }
+        }
+    }
+}
+
+// ── Xiaomi Warning ────────────────────────────────────────────────────────────
+@Composable
+private fun XiaomiWarningCard() {
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        colors = CardDefaults.cardColors(containerColor = RedError.copy(alpha = 0.1f)),
+        shape = RoundedCornerShape(14.dp),
+        border = androidx.compose.foundation.BorderStroke(1.dp, RedError.copy(alpha = 0.3f))
+    ) {
+        Row(modifier = Modifier.padding(14.dp), verticalAlignment = Alignment.Top) {
+            Icon(Icons.Default.Warning, null, tint = RedError, modifier = Modifier.size(20.dp))
+            Spacer(modifier = Modifier.width(10.dp))
+            Column {
+                Text(
+                    "Redmi / Xiaomi Warning",
+                    color = RedError,
+                    fontWeight = FontWeight.Bold,
+                    fontSize = 13.sp
+                )
+                Spacer(modifier = Modifier.height(4.dp))
+                Text(
+                    "Your phone aggressively kills apps when you swipe them away. This breaks the Accessibility Service.\n\n" +
+                            "To fix this forever:\n" +
+                            "1. Open the Recents (Recent Apps) menu.\n" +
+                            "2. Long-press on the Soltini app card.\n" +
+                            "3. Tap the Padlock (🔒) icon to lock it.\n\n" +
+                            "Once locked, swiping it away won't break Accessibility!",
                     color = TextSecondary,
                     fontSize = 12.sp,
                     lineHeight = 18.sp
