@@ -7,12 +7,16 @@ import android.app.PendingIntent
 import android.app.Service
 import android.content.Context
 import android.content.Intent
+import android.media.AudioFormat
+import android.media.AudioManager
+import android.media.MediaPlayer
 import android.os.Binder
 import android.os.Build
 import android.os.IBinder
 import android.os.PowerManager
 import android.os.SystemClock
 import android.util.Log
+import com.soltini.app.MainActivity
 import androidx.core.app.NotificationCompat
 import com.soltini.app.BootReceiver
 import com.soltini.app.agent.AgentToolExecutor
@@ -30,12 +34,18 @@ import com.soltini.app.overlay.OverlayService
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import org.json.JSONObject
 import java.util.concurrent.atomic.AtomicInteger
+import java.io.File
+import java.io.FileOutputStream
+import java.nio.ByteBuffer
+import java.nio.ByteOrder
 
 /**
  * BackgroundVoiceService
@@ -79,6 +89,7 @@ class BackgroundVoiceService : Service(), GeminiLiveListener, ToolCallListener {
     private lateinit var audioRecorder: AudioRecorder
     private lateinit var geminiLiveManager: GeminiLiveManager
     private lateinit var agentToolExecutor: AgentToolExecutor
+    private lateinit var backgroundAgentRunner: com.soltini.app.agent.BackgroundAgentRunner
 
     private val _hasMicPermission = MutableStateFlow(false)
     val hasMicPermission: StateFlow<Boolean> = _hasMicPermission.asStateFlow()
@@ -89,9 +100,27 @@ class BackgroundVoiceService : Service(), GeminiLiveListener, ToolCallListener {
     private val _isSleeping = MutableStateFlow(false)
     val isSleeping: StateFlow<Boolean> = _isSleeping.asStateFlow()
 
+    /**
+     * Lite Pause — mic/WS off, accessibility service silenced but still listed.
+     * Works for most banking apps. No re-enable needed.
+     */
+    private val _isLitePaused = MutableStateFlow(false)
+    val isLitePaused: StateFlow<Boolean> = _isLitePaused.asStateFlow()
+
+    /**
+     * Hard Pause — mic/WS off + disableSelf() on accessibility service.
+     * For strict banking apps (HDFC, ICICI, etc.). Requires one manual re-enable.
+     */
+    private val _isHardPaused = MutableStateFlow(false)
+    val isHardPaused: StateFlow<Boolean> = _isHardPaused.asStateFlow()
+
+    /** True if either pause mode is active (convenience for UI) */
+    val isPaused: StateFlow<Boolean> get() = _isLitePaused  // kept for compat — see combined below
+
     private val _transcripts = MutableStateFlow<List<TranscriptEntry>>(emptyList())
     val transcripts: StateFlow<List<TranscriptEntry>> = _transcripts.asStateFlow()
     private var currentGeminiTranscript = StringBuilder()
+    private var lastSpeechTimestamp = System.currentTimeMillis()
 
     // Expose flows from the child components
     lateinit var connectionState: StateFlow<ConnectionState>
@@ -100,12 +129,19 @@ class BackgroundVoiceService : Service(), GeminiLiveListener, ToolCallListener {
     lateinit var speakerAmplitude: StateFlow<Float>
     lateinit var isSpeaking: StateFlow<Boolean>
 
+    // Zero-battery MIUI bypass
+    private var silentMediaPlayer: MediaPlayer? = null
+
     inner class LocalBinder : Binder() {
         fun getService(): BackgroundVoiceService = this@BackgroundVoiceService
     }
 
     override fun onCreate() {
         super.onCreate()
+        Log.i(TAG, "BackgroundVoiceService created")
+
+        // Start hardware-offloaded silent audio to bypass MIUI's "Clear All" with 0% battery drain
+        startZeroBatterySilentAudioTrick()
 
         // ── FIRST: Call startForeground immediately ─────────────────────────────
         // Android 8+ will kill any service that does not call startForeground within
@@ -114,12 +150,31 @@ class BackgroundVoiceService : Service(), GeminiLiveListener, ToolCallListener {
         createNotificationChannel()
         startForegroundService()
 
-        // ── WakeLock with timeout ───────────────────────────────────────────────
+        // ── WakeLock with auto-renewal ──────────────────────────────────────────
         // A timeout prevents OEM battery managers (Xiaomi, Samsung, OnePlus) from
         // treating an indefinite WakeLock as a reason to kill the process.
+        // We also launch a coroutine that renews the lock every 9 minutes so it
+        // never expires during an ongoing voice session.
         val powerManager = getSystemService(Context.POWER_SERVICE) as PowerManager
         wakeLock = powerManager.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "Soltini::VoiceWakeLock")
-        wakeLock?.acquire(10 * 60 * 1000L) // 10-minute timeout
+        wakeLock?.acquire(10 * 60 * 1000L) // 10-minute initial timeout
+
+        // WakeLock auto-renewal coroutine — re-acquires every 9 minutes
+        serviceScope.launch {
+            while (isActive) {
+                delay(9 * 60 * 1000L) // renew 1 minute before expiry
+                if (!_isSleeping.value) {
+                    try {
+                        if (wakeLock?.isHeld == false) {
+                            wakeLock?.acquire(10 * 60 * 1000L)
+                            Log.d(TAG, "WakeLock renewed")
+                        }
+                    } catch (e: Exception) {
+                        Log.w(TAG, "WakeLock renewal failed: ${e.message}")
+                    }
+                }
+            }
+        }
 
         // ── User-configurable settings + memory ──────────────────────────────
         appSettings = AppSettings(this)
@@ -130,8 +185,17 @@ class BackgroundVoiceService : Service(), GeminiLiveListener, ToolCallListener {
                 if (!_isSleeping.value) {
                     geminiLiveManager.sendAudioChunk(pcmChunk)
                 }
+            },
+            onSpeechStateChanged = {
+                lastSpeechTimestamp = System.currentTimeMillis()
             }
-        )
+        ).apply {
+            isDataSaverEnabled = appSettings.isDataSaverEnabled
+            vadThreshold = appSettings.vadThreshold
+            micGain = appSettings.micGain
+            isScreenRecordingModeEnabled = appSettings.isScreenRecordingModeEnabled
+        }
+
 
         // Pass 'this' as both GeminiLiveListener and ToolCallListener
         geminiLiveManager = GeminiLiveManager(
@@ -142,6 +206,7 @@ class BackgroundVoiceService : Service(), GeminiLiveListener, ToolCallListener {
         )
 
         agentToolExecutor = AgentToolExecutor(this)
+        backgroundAgentRunner = com.soltini.app.agent.BackgroundAgentRunner(this, agentToolExecutor, appSettings)
 
         connectionState = geminiLiveManager.connectionState
         errorMessage = geminiLiveManager.errorMessage
@@ -153,6 +218,16 @@ class BackgroundVoiceService : Service(), GeminiLiveListener, ToolCallListener {
             connectionState.collect { state ->
                 when (state) {
                     ConnectionState.Live -> {
+                        if (appSettings.isScreenRecordingModeEnabled) {
+                            try {
+                                val am = getSystemService(Context.AUDIO_SERVICE) as AudioManager
+                                am.mode = AudioManager.MODE_IN_COMMUNICATION
+                            } catch (e: Exception) {
+                                Log.w(TAG, "Failed to set MODE_IN_COMMUNICATION: ${e.message}")
+                            }
+                        }
+
+                        lastSpeechTimestamp = System.currentTimeMillis()
                         if (_hasMicPermission.value) {
                             audioRecorder.startRecording()
                         }
@@ -160,9 +235,16 @@ class BackgroundVoiceService : Service(), GeminiLiveListener, ToolCallListener {
                         OverlayService.getInstance()?.setRingState(com.soltini.app.overlay.RingState.LISTENING)
                     }
                     ConnectionState.Disconnected, ConnectionState.Error -> {
+                        try {
+                            val am = getSystemService(Context.AUDIO_SERVICE) as AudioManager
+                            am.mode = AudioManager.MODE_NORMAL
+                        } catch (e: Exception) {
+                            Log.w(TAG, "Failed to restore MODE_NORMAL: ${e.message}")
+                        }
+
                         audioRecorder.stopRecording()
-                        val state = if (_isSleeping.value) com.soltini.app.overlay.RingState.SLEEPING else com.soltini.app.overlay.RingState.IDLE
-                        OverlayService.getInstance()?.setRingState(state)
+                        val ringState = if (_isSleeping.value) com.soltini.app.overlay.RingState.SLEEPING else com.soltini.app.overlay.RingState.IDLE
+                        OverlayService.getInstance()?.setRingState(ringState)
                     }
                     else -> {}
                 }
@@ -177,6 +259,10 @@ class BackgroundVoiceService : Service(), GeminiLiveListener, ToolCallListener {
         }
         serviceScope.launch {
             isSpeaking.collect { isSpeaking ->
+                audioRecorder.isModelSpeaking = isSpeaking
+                if (isSpeaking) {
+                    lastSpeechTimestamp = System.currentTimeMillis()
+                }
                 OverlayService.getInstance()?.setTalking(isSpeaking)
                 if (connectionState.value == ConnectionState.Live) {
                     if (isSpeaking) {
@@ -205,30 +291,94 @@ class BackgroundVoiceService : Service(), GeminiLiveListener, ToolCallListener {
         if (_isSleeping.value) {
             wakeUp()
         }
-        // START_STICKY: Android will restart this service automatically after it is
-        // killed (e.g. swipe from Recents), which keeps accessibility actions alive.
-        return START_STICKY
+        // START_NOT_STICKY: We explicitly do NOT want the OS to natively resurrect this service.
+        // Instead, we manually handle the "continuous agent" resurrection via AlarmManager in
+        // onTaskRemoved, which allows us to respect Pause Mode (i.e. we don't schedule the alarm
+        // if the user paused the agent before swiping it away).
+        return START_NOT_STICKY
     }
 
     override fun onTaskRemoved(rootIntent: Intent?) {
-        Log.i(TAG, "Task removed (swiped from recents) — scheduling AlarmManager to restart service")
-        val restartIntent = Intent(applicationContext, BootReceiver::class.java).apply {
-            action = "com.soltini.app.RESTART_SERVICE"
+        if (_isLitePaused.value || _isHardPaused.value) {
+            Log.i(TAG, "Task removed while PAUSED — shutting down completely and not auto-restarting")
+            
+            // Fully shut down everything since the user swiped away while paused
+            audioRecorder.stopRecording()
+            audioPlayer.stop()
+            geminiLiveManager.disconnect()
+            wakeLock?.let { if (it.isHeld) it.release() }
+            
+            com.soltini.app.agent.SoltiniAccessibilityService.getInstance()?.isToolCallActive = false
+            OverlayService.stop(this)
+            stopSelf()
+        } else {
+            Log.i(TAG, "Task removed (swiped from recents) — scheduling AlarmManager to restart service")
+            val restartIntent = Intent(applicationContext, com.soltini.app.BootReceiver::class.java).apply {
+                action = "com.soltini.app.RESTART_SERVICE"
+            }
+            val pendingIntent = PendingIntent.getBroadcast(
+                applicationContext,
+                1,
+                restartIntent,
+                PendingIntent.FLAG_ONE_SHOT or PendingIntent.FLAG_IMMUTABLE
+            )
+            val alarmManager = getSystemService(Context.ALARM_SERVICE) as android.app.AlarmManager
+            // Fire 1 second from now to allow the OS to finish killing the process first
+            alarmManager.set(
+                android.app.AlarmManager.ELAPSED_REALTIME_WAKEUP,
+                android.os.SystemClock.elapsedRealtime() + 1000,
+                pendingIntent
+            )
         }
-        val pendingIntent = PendingIntent.getBroadcast(
-            applicationContext,
-            1,
-            restartIntent,
-            PendingIntent.FLAG_ONE_SHOT or PendingIntent.FLAG_IMMUTABLE
-        )
-        val alarmManager = getSystemService(Context.ALARM_SERVICE) as AlarmManager
-        // Fire 1 second from now to allow the OS to finish killing the process first
-        alarmManager.set(
-            AlarmManager.ELAPSED_REALTIME_WAKEUP,
-            SystemClock.elapsedRealtime() + 1000,
-            pendingIntent
-        )
+        
         super.onTaskRemoved(rootIntent)
+    }
+
+    private fun startZeroBatterySilentAudioTrick() {
+        try {
+            // Generate a tiny 1-second silent WAV file
+            val silentFile = File(cacheDir, "zero_battery_silence.wav")
+            if (!silentFile.exists()) {
+                val sampleRate = 8000
+                val channels = 1
+                val bitsPerSample = 16
+                val byteRate = sampleRate * channels * bitsPerSample / 8
+                val totalDataLen = sampleRate * 2 // 1 second of audio
+                val totalAudioLen = totalDataLen
+                val totalDataLenWithHeader = totalDataLen + 36
+
+                val header = ByteBuffer.allocate(44).order(ByteOrder.LITTLE_ENDIAN)
+                header.put("RIFF".toByteArray())
+                header.putInt(totalDataLenWithHeader)
+                header.put("WAVE".toByteArray())
+                header.put("fmt ".toByteArray())
+                header.putInt(16) // Subchunk1Size
+                header.putShort(1.toShort()) // AudioFormat (PCM)
+                header.putShort(channels.toShort())
+                header.putInt(sampleRate)
+                header.putInt(byteRate)
+                header.putShort((channels * bitsPerSample / 8).toShort()) // BlockAlign
+                header.putShort(bitsPerSample.toShort())
+                header.put("data".toByteArray())
+                header.putInt(totalAudioLen)
+
+                FileOutputStream(silentFile).use { fos ->
+                    fos.write(header.array())
+                    fos.write(ByteArray(totalAudioLen)) // zeroes
+                }
+            }
+
+            silentMediaPlayer = MediaPlayer().apply {
+                setDataSource(silentFile.absolutePath)
+                setVolume(0f, 0f)
+                isLooping = true
+                prepare()
+                start()
+            }
+            Log.i(TAG, "Zero-battery silent audio trick activated.")
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to start silent media player: ${e.message}")
+        }
     }
 
     override fun onBind(intent: Intent): IBinder {
@@ -247,6 +397,10 @@ class BackgroundVoiceService : Service(), GeminiLiveListener, ToolCallListener {
     }
 
     fun connect() {
+        if (isPaused.value) {
+            Log.i(TAG, "connect() ignored because service is paused.")
+            return
+        }
         _isSleeping.value = false
         geminiLiveManager.connect()
     }
@@ -258,6 +412,10 @@ class BackgroundVoiceService : Service(), GeminiLiveListener, ToolCallListener {
      */
     fun reconnect() {
         Log.i(TAG, "Reconnecting to apply new AI settings")
+        audioRecorder.isDataSaverEnabled = appSettings.isDataSaverEnabled
+        audioRecorder.vadThreshold = appSettings.vadThreshold
+        audioRecorder.micGain = appSettings.micGain
+        audioRecorder.isScreenRecordingModeEnabled = appSettings.isScreenRecordingModeEnabled
         audioRecorder.stopRecording()
         audioPlayer.stop()
         geminiLiveManager.disconnect()
@@ -284,6 +442,134 @@ class BackgroundVoiceService : Service(), GeminiLiveListener, ToolCallListener {
         _transcripts.value = emptyList()
         currentGeminiTranscript.clear()
     }
+
+    // ── Lite Pause (default) ─────────────────────────────────────────────────
+    /**
+     * Lite Pause Mode:
+     *   • Stops mic + WebSocket (0 data while paused)
+     *   • Sets isPausedLite = true on the accessibility service, making it
+     *     completely silent: onAccessibilityEvent returns immediately,
+     *     no window reads — functionally invisible to most banking apps
+     *     (GPay, PhonePe, Paytm, most bank apps check for active monitoring,
+     *     not just whether the service is listed).
+     *   • Does NOT call disableSelf() — so NO re-enable is needed on resume.
+     *   • Resume is instant: mic + WebSocket reconnect automatically.
+     */
+    fun enterLitePauseMode() {
+        if (_isLitePaused.value || _isHardPaused.value) return
+        Log.i(TAG, "Entering Lite Pause — silencing accessibility without disabling")
+        _isLitePaused.value = true
+        _isSleeping.value = true
+
+        audioRecorder.stopRecording()
+        audioPlayer.stop()
+        geminiLiveManager.disconnect()
+        wakeLock?.let { if (it.isHeld) it.release() }
+
+        // Silence the service without disabling it
+        com.soltini.app.agent.SoltiniAccessibilityService.getInstance()?.isPausedLite = true
+        com.soltini.app.agent.SoltiniAccessibilityService.getInstance()?.isToolCallActive = false
+
+        // Completely hide the orb overlay while paused
+        OverlayService.getInstance()?.setHiddenForBanking(true)
+        updateNotification("⏸ Lite Pause — tap to resume")
+    }
+
+    fun exitLitePauseMode() {
+        if (!_isLitePaused.value) return
+        Log.i(TAG, "Exiting Lite Pause")
+        _isLitePaused.value = false
+        _isSleeping.value = false
+
+        // Un-silence the accessibility service
+        com.soltini.app.agent.SoltiniAccessibilityService.getInstance()?.isPausedLite = false
+
+        if (wakeLock?.isHeld == false) wakeLock?.acquire(10 * 60 * 1000L)
+        // Show the orb overlay again
+        OverlayService.getInstance()?.setHiddenForBanking(false)
+        OverlayService.getInstance()?.setRingState(com.soltini.app.overlay.RingState.IDLE)
+        updateNotification("Your AI Assistant is ready")
+        connect()
+    }
+
+    fun toggleLitePauseMode() {
+        if (_isLitePaused.value) exitLitePauseMode() else enterLitePauseMode()
+    }
+
+    // ── Hard Pause (strict banks) ─────────────────────────────────────────────
+    /**
+     * Hard Pause Mode:
+     *   • Stops mic + WebSocket
+     *   • Calls disableSelf() — removes Soltini from Android's enabled-services
+     *     list entirely. Even the most strict banking apps (HDFC, ICICI) will
+     *     not find it.
+     *   • On resume, automatically opens the accessibility settings screen so the
+     *     user only needs ONE tap to re-enable (instead of hunting through menus).
+     */
+    fun enterHardPauseMode() {
+        if (_isHardPaused.value || _isLitePaused.value) return
+        Log.i(TAG, "Entering Hard Pause (Force Stop) — opening App Info to self-terminate")
+        _isHardPaused.value = true
+        _isSleeping.value = true
+
+        audioRecorder.stopRecording()
+        audioPlayer.stop()
+        geminiLiveManager.disconnect()
+        wakeLock?.let { if (it.isHeld) it.release() }
+
+        // Tell the accessibility service to look for and click the Force Stop button
+        val a11yService = com.soltini.app.agent.SoltiniAccessibilityService.getInstance()
+        if (a11yService != null) {
+            a11yService.isAutomatingForceStop = true
+
+            // Launch the App Info settings screen for this app
+            val intent = Intent(android.provider.Settings.ACTION_APPLICATION_DETAILS_SETTINGS).apply {
+                data = android.net.Uri.fromParts("package", packageName, null)
+                flags = Intent.FLAG_ACTIVITY_NEW_TASK
+            }
+            startActivity(intent)
+        } else {
+            // Fallback if accessibility is dead
+            stopSelf()
+        }
+
+        OverlayService.getInstance()?.setRingState(com.soltini.app.overlay.RingState.SLEEPING)
+        updateNotification("🔴 Force Stopped — open app to resume")
+    }
+
+    fun exitHardPauseMode() {
+        if (!_isHardPaused.value) return
+        Log.i(TAG, "Exiting Hard Pause (Force Stop mode)")
+        _isHardPaused.value = false
+        _isSleeping.value = false
+
+        if (wakeLock?.isHeld == false) wakeLock?.acquire(10 * 60 * 1000L)
+        OverlayService.getInstance()?.setRingState(com.soltini.app.overlay.RingState.IDLE)
+        updateNotification("Your AI Assistant is ready")
+
+        // Accessibility is automatically rebound when the app is manually launched after Force Stop
+        connect()
+    }
+
+    fun toggleHardPauseMode() {
+        if (_isHardPaused.value) exitHardPauseMode() else enterHardPauseMode()
+    }
+
+    private fun openAccessibilitySettings() {
+        try {
+            val intent = android.content.Intent(android.provider.Settings.ACTION_ACCESSIBILITY_SETTINGS).apply {
+                addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK)
+            }
+            startActivity(intent)
+        } catch (e: Exception) {
+            Log.w(TAG, "Could not open accessibility settings: ${e.message}")
+        }
+    }
+
+    // Legacy compat — togglePauseMode now triggers Lite Pause by default
+    fun enterPauseMode() = enterLitePauseMode()
+    fun exitPauseMode() = if (_isLitePaused.value) exitLitePauseMode() else exitHardPauseMode()
+    fun togglePauseMode() = toggleLitePauseMode()
 
     /**
      * Puts Soltini into 100% sleep:
@@ -352,31 +638,71 @@ class BackgroundVoiceService : Service(), GeminiLiveListener, ToolCallListener {
      * other. High-friction accessibility tracking is on only while count > 0.
      */
     override fun onToolCall(callId: String, toolName: String, args: JSONObject) {
-        serviceScope.launch(Dispatchers.IO) {
-            Log.i(TAG, "Executing tool: $toolName (callId=$callId)")
+        Log.i(TAG, "Tool call received: $toolName (callId=$callId) | args: $args")
 
-            if (toolName == "sleep_agent") {
-                sleep()
-                return@launch
+        if (toolName == "sleep_agent") {
+            sleep()
+            return
+        }
+
+        if (toolName == "trigger_automation") {
+            val request = args.optString("request", "")
+            Log.i(TAG, "Triggering background automation agent for request: \"$request\"")
+
+            // 1. Immediately acknowledge to Live Voice model so it says "I'm on it!" without delay
+            geminiLiveManager.sendToolResponse(
+                callId,
+                toolName,
+                JSONObject().apply {
+                    put("status", "in_progress")
+                    put("message", "Automation task triggered for: \"$request\". Tell the user you are working on it now (e.g. \"I'm on it!\" or \"Working on that now!\"). Do NOT say it is already finished yet.")
+                }
+            )
+
+            // 2. Execute background agent loop asynchronously
+            serviceScope.launch(Dispatchers.IO) {
+                val count = activeToolCallCount.incrementAndGet()
+                if (count == 1) {
+                    com.soltini.app.agent.SoltiniAccessibilityService.getInstance()?.isToolCallActive = true
+                }
+                try {
+                    val summary = backgroundAgentRunner.execute(request)
+                    Log.i(TAG, "Background automation finished with summary: $summary")
+                    geminiLiveManager.sendClientContent(
+                        "[SYSTEM NOTIFICATION: Background automation completed for request: \"$request\". Outcome: $summary. Confirm execution to the user now in a brief, friendly way!]"
+                    )
+                } catch (e: Exception) {
+                    Log.e(TAG, "Background automation failed: ${e.message}", e)
+                    geminiLiveManager.sendClientContent(
+                        "[SYSTEM NOTIFICATION: Background automation failed for request: \"$request\" with error: ${e.message}. Briefly inform the user.]"
+                    )
+                } finally {
+                    val remaining = activeToolCallCount.decrementAndGet()
+                    if (remaining <= 0) {
+                        activeToolCallCount.set(0)
+                        com.soltini.app.agent.SoltiniAccessibilityService.getInstance()?.isToolCallActive = false
+                    }
+                }
             }
+            return
+        }
 
-            // Increment counter and activate accessibility event tracking
+        // Direct device tools (open_app, lock_device, wake_device, press_back, press_home, press_recents)
+        serviceScope.launch(Dispatchers.IO) {
+            Log.i(TAG, "Executing direct tool: $toolName (callId=$callId)")
+
             val count = activeToolCallCount.incrementAndGet()
-            Log.d(TAG, "Tool call started — activeToolCallCount=$count")
             if (count == 1) {
-                // Activate using the safe @Volatile flag — never touches serviceInfo
                 com.soltini.app.agent.SoltiniAccessibilityService.getInstance()?.isToolCallActive = true
             }
 
             try {
                 val result = agentToolExecutor.execute(toolName, args)
-                geminiLiveManager.sendToolResponse(callId, result)
+                geminiLiveManager.sendToolResponse(callId, toolName, result)
             } finally {
                 val remaining = activeToolCallCount.decrementAndGet()
-                Log.d(TAG, "Tool call finished — activeToolCallCount=$remaining")
                 if (remaining <= 0) {
                     activeToolCallCount.set(0)
-                    // Deactivate using the safe @Volatile flag
                     com.soltini.app.agent.SoltiniAccessibilityService.getInstance()?.isToolCallActive = false
                 }
             }
@@ -437,6 +763,12 @@ class BackgroundVoiceService : Service(), GeminiLiveListener, ToolCallListener {
     override fun onDestroy() {
         super.onDestroy()
 
+        try {
+            silentMediaPlayer?.stop()
+            silentMediaPlayer?.release()
+            silentMediaPlayer = null
+        } catch (e: Exception) { /* ignore */ }
+
         wakeLock?.let {
             if (it.isHeld) it.release()
         }
@@ -446,12 +778,30 @@ class BackgroundVoiceService : Service(), GeminiLiveListener, ToolCallListener {
         geminiLiveManager.disconnect()
     }
 
-    private fun startForegroundService() {
-        val notification = NotificationCompat.Builder(this, CHANNEL_ID)
+    private fun buildNotification(text: String): android.app.Notification {
+        val tapIntent = Intent(this, MainActivity::class.java).apply {
+            flags = Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP
+        }
+        val tapPendingIntent = PendingIntent.getActivity(
+            this, 0, tapIntent,
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+        )
+        return NotificationCompat.Builder(this, CHANNEL_ID)
             .setContentTitle("Soltini")
-            .setContentText("Your AI Assistant is ready")
+            .setContentText(text)
             .setSmallIcon(android.R.drawable.ic_btn_speak_now)
+            .setContentIntent(tapPendingIntent)
+            .setOngoing(true)
             .build()
+    }
+
+    private fun updateNotification(text: String) {
+        val nm = getSystemService(NotificationManager::class.java)
+        nm?.notify(NOTIFICATION_ID, buildNotification(text))
+    }
+
+    private fun startForegroundService() {
+        val notification = buildNotification("Your AI Assistant is ready")
 
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
             val hasMicPermission = androidx.core.content.ContextCompat.checkSelfPermission(
@@ -462,7 +812,6 @@ class BackgroundVoiceService : Service(), GeminiLiveListener, ToolCallListener {
             if (hasMicPermission && Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
                 startForeground(NOTIFICATION_ID, notification, android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE)
             } else if (Build.VERSION.SDK_INT >= 34) {
-                // API 34+ requires a type. Since we don't have mic yet, fallback to specialUse (1 << 30)
                 startForeground(NOTIFICATION_ID, notification, 1073741824)
             } else {
                 startForeground(NOTIFICATION_ID, notification)

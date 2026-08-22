@@ -39,7 +39,6 @@
             android:name=".MainActivity"
             android:exported="true"
             android:label="@string/app_name"
-            android:excludeFromRecents="true"
             android:theme="@style/Theme.Soltini">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
@@ -84,6 +83,17 @@
              Gives Soltini the ability to call performGlobalAction(LOCK_SCREEN).
              Must be enabled manually in Settings → Accessibility.
              On Android 13+ sideloaded APKs: user must "Allow restricted settings" first.
+
+             NOTE: We intentionally do NOT use android:process=":a11y" here.
+             The entire agent automation stack (YouTubeAutomator, WhatsAppAutomator,
+             AgentToolExecutor etc.) relies on SoltiniAccessibilityService.getInstance()
+             which is a same-process singleton. A separate process would make
+             getInstance() always return null in the main process.
+
+             Android only auto-disables accessibility services on CRASH (uncaught exception).
+             A SIGKILL from MIUI is NOT a crash — Android rebinds the service when
+             the process restarts via AlarmManager + BootReceiver.
+             All lifecycle callbacks are wrapped in try/catch to prevent crashes.
         ─────────────────────────────────────────────────────────────────── -->
         <service
             android:name=".agent.SoltiniAccessibilityService"
@@ -96,6 +106,7 @@
                 android:name="android.accessibilityservice"
                 android:resource="@xml/accessibility_service_config" />
         </service>
+
 
         <!-- ── OverlayService ──────────────────────────────────────────── -->
         <service
@@ -115,6 +126,18 @@
             android:foregroundServiceType="microphone|specialUse">
             <property android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
                       android:value="ai_voice_assistant_background"/>
+        </service>
+
+        <!-- ── BankingModeTileService (Quick Settings Tile) ─────────────── -->
+        <service
+            android:name=".services.BankingModeTileService"
+            android:icon="@mipmap/ic_launcher"
+            android:label="Soltini Banking Mode"
+            android:permission="android.permission.BIND_QUICK_SETTINGS_TILE"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.service.quicksettings.action.QS_TILE" />
+            </intent-filter>
         </service>
 
         <!-- ── BootReceiver ────────────────────────────────────────────────

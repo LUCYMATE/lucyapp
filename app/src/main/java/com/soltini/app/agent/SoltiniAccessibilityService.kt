@@ -80,6 +80,30 @@ class SoltiniAccessibilityService : AccessibilityService() {
             Log.i(TAG, "isToolCallActive = $value")
         }
 
+    /**
+     * Lite Pause Mode flag.
+     *
+     * When true the accessibility service stays ENABLED in the Android system list
+     * (so no user interaction is needed to resume), but:
+     *   • onAccessibilityEvent() returns immediately without doing anything
+     *   • All content/window queries return null / empty
+     *
+     * This makes Soltini functionally invisible to banking apps that check what
+     * the accessibility service is actually reading. The service appears "on" but
+     * is completely silent — meeting the spirit of most banking app checks which
+     * look for services actively monitoring content (canRetrieveWindowContent
+     * reads, active window captures, etc.).
+     *
+     * For stricter banking apps that check the raw enabled-services list,
+     * use Hard Pause (disableSelf()) via enterHardPauseMode().
+     */
+    @Volatile
+    var isPausedLite: Boolean = false
+        set(value) {
+            field = value
+            Log.i(TAG, "Lite Pause = $value")
+        }
+
     // Last focused editable node — updated only when a tool call is active
     private var lastFocusedEditable: AccessibilityNodeInfo? = null
 
@@ -91,29 +115,66 @@ class SoltiniAccessibilityService : AccessibilityService() {
         // NOTE: We do NOT modify serviceInfo here. The static XML config is the
         // single source of truth for event subscriptions. Touching serviceInfo
         // at runtime was the root cause of the auto-disable bug.
-        
-        // Auto-restart the background voice service if the OS re-binds this accessibility 
-        // service after the app was killed from Recents.
-        try {
-            val serviceIntent = android.content.Intent(this, com.soltini.app.services.BackgroundVoiceService::class.java)
-            if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.O) {
-                startForegroundService(serviceIntent)
-            } else {
-                startService(serviceIntent)
-            }
-            Log.i(TAG, "Accessibility Service successfully started BackgroundVoiceService")
-        } catch (e: Exception) {
-            Log.e(TAG, "Failed to start BackgroundVoiceService from AccessibilityService: ${e.message}")
-        }
     }
 
+    @Volatile
+    var isAutomatingForceStop: Boolean = false
+
+    private val appSettings by lazy { com.soltini.app.settings.AppSettings(this) }
+
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {
+        // Lite Pause: service is alive but completely silent — return immediately
+        if (isPausedLite) return
         try {
             event ?: return
+            val eventType = event.eventType
+
+            if (isAutomatingForceStop) {
+                // We are looking for "Force stop" or "OK" buttons
+                val root = rootInActiveWindow
+                if (root != null) {
+                    // Look for "Force stop"
+                    var forceStopNode = findNodeByQuery(root, "force stop", requireClickable = true)
+                    // Some UIs use "Force closed" or just "Force"
+                    if (forceStopNode == null) forceStopNode = findNodeByQuery(root, "force", requireClickable = true)
+                    
+                    if (forceStopNode != null) {
+                        Log.i(TAG, "Found Force Stop button, clicking it!")
+                        forceStopNode.performAction(AccessibilityNodeInfo.ACTION_CLICK)
+                        forceStopNode.recycle()
+                        // Don't return yet, we might also see the OK button immediately on some UIs
+                    }
+
+                    // Look for confirmation button ("OK" or "Force stop" again)
+                    val okNode = findNodeByQuery(root, "ok", requireClickable = true)
+                    if (okNode != null) {
+                        Log.i(TAG, "Found OK confirmation, clicking it!")
+                        okNode.performAction(AccessibilityNodeInfo.ACTION_CLICK)
+                        okNode.recycle()
+                        isAutomatingForceStop = false // Automation complete
+                    }
+                    root.recycle()
+                }
+            }
+
+            if (eventType == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED) {
+                val packageName = event.packageName?.toString()
+                if (!packageName.isNullOrBlank()) {
+                    if (appSettings.isBankingProtectionEnabled && appSettings.isBankingApp(packageName)) {
+                        Log.i(TAG, "Banking app in foreground ($packageName) — hiding overlay & pausing A11y")
+                        isToolCallActive = false
+                        com.soltini.app.overlay.OverlayService.getInstance()?.setHiddenForBanking(true)
+                    } else if (appSettings.isBankingProtectionEnabled) {
+                        // Switched back to a normal app — restore overlay
+                        com.soltini.app.overlay.OverlayService.getInstance()?.setHiddenForBanking(false)
+                    }
+                }
+            }
+
             // Only track focused editable views when a tool call is in progress.
             // When idle this callback fires but we do nothing — zero friction.
             if (!isToolCallActive) return
-            if (event.eventType == AccessibilityEvent.TYPE_VIEW_FOCUSED) {
+            if (eventType == AccessibilityEvent.TYPE_VIEW_FOCUSED) {
                 val node = event.source
                 if (node != null && node.isEditable) {
                     lastFocusedEditable?.recycle()
@@ -126,16 +187,22 @@ class SoltiniAccessibilityService : AccessibilityService() {
     }
 
     override fun onInterrupt() {
-        Log.w(TAG, "Accessibility Service interrupted")
+        // Wrap in try/catch — any uncaught exception here causes Android to mark
+        // the service as crashed and may auto-disable the permission.
+        try {
+            Log.w(TAG, "Accessibility Service interrupted")
+        } catch (_: Throwable) {}
     }
 
     override fun onDestroy() {
-        // Clear instance BEFORE super so no in-flight tool call fires against
-        // a destroyed service context.
-        instance = null
-        isToolCallActive = false
-        lastFocusedEditable?.recycle()
-        lastFocusedEditable = null
+        try {
+            // Clear instance BEFORE super so no in-flight tool call fires against
+            // a destroyed service context.
+            instance = null
+            isToolCallActive = false
+            lastFocusedEditable?.recycle()
+            lastFocusedEditable = null
+        } catch (_: Throwable) {}
         super.onDestroy()
         Log.i(TAG, "Accessibility Service destroyed")
     }
@@ -290,35 +357,53 @@ class SoltiniAccessibilityService : AccessibilityService() {
     // ─── Typing ───────────────────────────────────────────────────────────────
 
     fun typeText(text: String): Boolean {
-        val cached = lastFocusedEditable
-        if (cached != null && cached.isEditable) {
-            val success = setTextOnNode(cached, text)
-            if (success) return true
-        }
-
-        val windows: List<AccessibilityWindowInfo> = windows ?: return false
-        for (window in windows) {
-            val root = window.root ?: continue
-            val editable = findFirstEditable(root)
-            root.recycle()
-            if (editable != null) {
-                editable.performAction(AccessibilityNodeInfo.ACTION_ACCESSIBILITY_FOCUS)
-                val success = setTextOnNode(editable, text)
-                editable.recycle()
-                if (success) return true
+        try {
+            val cached = lastFocusedEditable
+            if (cached != null) {
+                try {
+                    if (cached.isEditable) {
+                        val success = setTextOnNode(cached, text)
+                        if (success) return true
+                    }
+                } catch (_: Exception) {
+                    // cached node was recycled by the system — clear it and fall through
+                    lastFocusedEditable = null
+                }
             }
+
+            val windows: List<AccessibilityWindowInfo> = windows ?: return false
+            for (window in windows) {
+                val root = window.root ?: continue
+                val editable = findFirstEditable(root)
+                root.recycle()
+                if (editable != null) {
+                    editable.performAction(AccessibilityNodeInfo.ACTION_ACCESSIBILITY_FOCUS)
+                    val success = setTextOnNode(editable, text)
+                    editable.recycle()
+                    if (success) return true
+                }
+            }
+            Log.w(TAG, "typeText: no editable field found on screen")
+            return false
+        } catch (e: Exception) {
+            Log.e(TAG, "typeText failed: ${e.message}")
+            return false
         }
-        Log.w(TAG, "typeText: no editable field found on screen")
-        return false
     }
 
     private fun setTextOnNode(node: AccessibilityNodeInfo, text: String): Boolean {
-        val args = Bundle()
-        args.putCharSequence(AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE, text)
-        val success = node.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, args)
-        Log.i(TAG, "setTextOnNode('$text') -> $success")
-        return success
+        return try {
+            val args = Bundle()
+            args.putCharSequence(AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE, text)
+            val success = node.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, args)
+            Log.i(TAG, "setTextOnNode('$text') -> $success")
+            success
+        } catch (e: Exception) {
+            Log.e(TAG, "setTextOnNode failed: ${e.message}")
+            false
+        }
     }
+
 
     fun clearText(): Boolean = typeText("")
 

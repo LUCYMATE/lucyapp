@@ -3,6 +3,7 @@ package com.soltini.app
 import android.Manifest
 import android.content.Context
 import android.content.pm.PackageManager
+import android.os.Build
 import android.os.Bundle
 import android.provider.Settings
 import androidx.activity.ComponentActivity
@@ -22,9 +23,11 @@ import androidx.lifecycle.ViewModelProvider
 import com.soltini.app.overlay.OverlayService
 import com.soltini.app.ui.LogScreen
 import com.soltini.app.ui.MainViewModel
+import com.soltini.app.ui.MiuiOnboardingScreen
 import com.soltini.app.ui.PermissionsScreen
 import com.soltini.app.ui.SettingsScreen
 import com.soltini.app.ui.VoiceScreen
+import com.soltini.app.ui.isMiuiOnboardingNeeded
 import com.soltini.app.ui.theme.GeminiVoiceTheme
 
 /**
@@ -54,8 +57,15 @@ class MainActivity : ComponentActivity() {
 
                 // Only block on Microphone for the very first launch.
                 // Everything else is managed from the Settings page.
+                // On Xiaomi/POCO/Redmi, show MIUI onboarding after mic is granted (once only).
                 var currentScreen by remember {
-                    mutableStateOf(if (hasMic) "voice" else "permissions")
+                    mutableStateOf(
+                        when {
+                            !hasMic -> "permissions"
+                            isMiuiOnboardingNeeded(this@MainActivity) -> "miui_onboarding"
+                            else -> "voice"
+                        }
+                    )
                 }
 
                 // Start the overlay service as soon as we are past the mic gate
@@ -72,8 +82,20 @@ class MainActivity : ComponentActivity() {
                         "permissions" -> {
                             // First-launch screen: only asks for Microphone
                             PermissionsScreen(
-                                onAllPermissionsGranted = { currentScreen = "voice" },
+                                onAllPermissionsGranted = {
+                                    // After mic granted, check if MIUI onboarding is needed
+                                    currentScreen = if (isMiuiOnboardingNeeded(this@MainActivity)) {
+                                        "miui_onboarding"
+                                    } else {
+                                        "voice"
+                                    }
+                                },
                                 modifier = Modifier
+                            )
+                        }
+                        "miui_onboarding" -> {
+                            MiuiOnboardingScreen(
+                                onComplete = { currentScreen = "voice" }
                             )
                         }
                         "logs" -> {

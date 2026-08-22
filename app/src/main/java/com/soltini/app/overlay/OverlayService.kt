@@ -41,61 +41,100 @@ import kotlin.math.min
 class DraggableFrameLayout(context: Context) : FrameLayout(context) {
 
     var onDrag: ((dx: Float, dy: Float) -> Unit)? = null
+    var onDragEnd: (() -> Unit)? = null
     var onTap: (() -> Unit)? = null
     var onLongPress: (() -> Unit)? = null
 
-    private var startX = 0f
-    private var startY = 0f
-    private var dragging = false
+    private var initialDownX = 0f
+    private var initialDownY = 0f
+    private var lastX = 0f
+    private var lastY = 0f
+    private var isDragging = false
     private val slop = ViewConfiguration.get(context).scaledTouchSlop
     private val longPressTimeout = ViewConfiguration.getLongPressTimeout().toLong()
     private val handler = Handler(Looper.getMainLooper())
 
-    private val longPressRunnable = Runnable { onLongPress?.invoke() }
+    private val longPressRunnable = Runnable {
+        if (!isDragging) {
+            onLongPress?.invoke()
+        }
+    }
 
     override fun onInterceptTouchEvent(ev: MotionEvent): Boolean {
         when (ev.actionMasked) {
             MotionEvent.ACTION_DOWN -> {
-                startX = ev.rawX
-                startY = ev.rawY
-                dragging = false
+                initialDownX = ev.rawX
+                initialDownY = ev.rawY
+                lastX = ev.rawX
+                lastY = ev.rawY
+                isDragging = false
+                handler.removeCallbacks(longPressRunnable)
                 handler.postDelayed(longPressRunnable, longPressTimeout)
             }
             MotionEvent.ACTION_MOVE -> {
-                val dx = abs(ev.rawX - startX)
-                val dy = abs(ev.rawY - startY)
-                if (dx > slop || dy > slop) {
-                    dragging = true
+                val totalDx = abs(ev.rawX - initialDownX)
+                val totalDy = abs(ev.rawY - initialDownY)
+                if (totalDx > slop || totalDy > slop) {
+                    isDragging = true
                     handler.removeCallbacks(longPressRunnable)
-                    return true // intercept — steal from WebView
+                    return true // Intercept touch events — steal gesture from child
                 }
             }
             MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
                 handler.removeCallbacks(longPressRunnable)
-                if (!dragging) {
-                    // tap — let WebView handle it
-                }
             }
         }
-        return false // don't intercept taps
+        return isDragging
     }
 
     @SuppressLint("ClickableViewAccessibility")
     override fun onTouchEvent(ev: MotionEvent): Boolean {
         when (ev.actionMasked) {
             MotionEvent.ACTION_DOWN -> {
-                startX = ev.rawX
-                startY = ev.rawY
+                initialDownX = ev.rawX
+                initialDownY = ev.rawY
+                lastX = ev.rawX
+                lastY = ev.rawY
+                isDragging = false
+                handler.removeCallbacks(longPressRunnable)
+                handler.postDelayed(longPressRunnable, longPressTimeout)
             }
             MotionEvent.ACTION_MOVE -> {
-                val dx = ev.rawX - startX
-                val dy = ev.rawY - startY
-                startX = ev.rawX
-                startY = ev.rawY
-                onDrag?.invoke(dx, dy)
+                val totalDx = abs(ev.rawX - initialDownX)
+                val totalDy = abs(ev.rawY - initialDownY)
+                if (totalDx > slop || totalDy > slop) {
+                    if (!isDragging) {
+                        isDragging = true
+                        handler.removeCallbacks(longPressRunnable)
+                    }
+                    val dx = ev.rawX - lastX
+                    val dy = ev.rawY - lastY
+                    lastX = ev.rawX
+                    lastY = ev.rawY
+                    onDrag?.invoke(dx, dy)
+                }
             }
             MotionEvent.ACTION_UP -> {
-                if (!dragging) onTap?.invoke()
+                handler.removeCallbacks(longPressRunnable)
+                val totalDx = abs(ev.rawX - initialDownX)
+                val totalDy = abs(ev.rawY - initialDownY)
+                val isClick = !isDragging && (totalDx <= slop && totalDy <= slop)
+
+                if (isClick) {
+                    android.util.Log.d("DraggableFrameLayout", "Touch gesture identified as CLICK (totalDx=$totalDx, totalDy=$totalDy)")
+                    onTap?.invoke()
+                } else {
+                    android.util.Log.d("DraggableFrameLayout", "Touch gesture identified as DRAG (totalDx=$totalDx, totalDy=$totalDy)")
+                    onDragEnd?.invoke()
+                }
+                isDragging = false
+            }
+            MotionEvent.ACTION_CANCEL -> {
+                handler.removeCallbacks(longPressRunnable)
+                if (isDragging) {
+                    onDragEnd?.invoke()
+                }
+                isDragging = false
             }
         }
         return true
@@ -140,6 +179,7 @@ class OverlayService : Service() {
         const val CHANNEL_ID = "AriaOverlayChannel"
         const val NOTIFICATION_ID = 1001
         const val ACTION_STOP = "com.soltini.app.STOP_OVERLAY"
+        const val ACTION_TOGGLE_BANKING_PAUSE = "com.soltini.app.TOGGLE_BANKING_PAUSE"
 
         @SuppressLint("StaticFieldLeak")
         private var instance: OverlayService? = null
@@ -159,6 +199,38 @@ class OverlayService : Service() {
             val intent = Intent(context, OverlayService::class.java)
             context.stopService(intent)
         }
+    }
+
+    @Volatile
+    private var isHiddenForBanking = false
+
+    fun isHiddenForBanking(): Boolean = isHiddenForBanking
+
+    fun setHiddenForBanking(hidden: Boolean) {
+        if (isHiddenForBanking == hidden) return
+        isHiddenForBanking = hidden
+        android.util.Log.i("OverlayService", "setHiddenForBanking: $hidden")
+        mainHandler.post {
+            if (::overlayView.isInitialized && ::windowManager.isInitialized) {
+                try {
+                    overlayView.visibility = if (hidden) View.GONE else View.VISIBLE
+                    if (hidden) {
+                        layoutParams.flags = layoutParams.flags or WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE
+                    } else {
+                        layoutParams.flags = layoutParams.flags and WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE.inv()
+                    }
+                    windowManager.updateViewLayout(overlayView, layoutParams)
+                } catch (e: Exception) {
+                    android.util.Log.e("OverlayService", "Failed to update layout params for banking hide: ${e.message}")
+                }
+            }
+        }
+        updateNotification()
+    }
+
+    private fun updateNotification() {
+        val notificationManager = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+        notificationManager.notify(NOTIFICATION_ID, createNotification())
     }
 
     override fun onCreate() {
@@ -181,11 +253,17 @@ class OverlayService : Service() {
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        if (intent?.action == ACTION_STOP) {
-            stopSelf()
-            return START_NOT_STICKY
+        when (intent?.action) {
+            ACTION_STOP -> {
+                stopSelf()
+                return START_NOT_STICKY
+            }
+            ACTION_TOGGLE_BANKING_PAUSE -> {
+                setHiddenForBanking(!isHiddenForBanking)
+                return START_NOT_STICKY
+            }
         }
-        return START_STICKY
+        return START_NOT_STICKY
     }
 
     @SuppressLint("SetJavaScriptEnabled")
@@ -212,6 +290,8 @@ class OverlayService : Service() {
             setBackgroundColor(Color.TRANSPARENT)
             setLayerType(View.LAYER_TYPE_HARDWARE, null)
             visibility = View.GONE // Disabled 3D display as per user request to avoid errors
+            onPause()
+            pauseTimers()
             addJavascriptInterface(bridge, "AriaNative")
             // WebViewClient to suppress error pages
             webViewClient = object : WebViewClient() {
@@ -295,13 +375,17 @@ class OverlayService : Service() {
             }
         }
 
+        overlayView.onDragEnd = {
+            // Do nothing, let the user place it anywhere they want (even middle of screen)
+        }
+
         overlayView.onTap = {
             onAvatarTapped()
         }
 
         overlayView.onLongPress = {
-            // Snap to nearest edge on long press
-            snapToEdge()
+            // Snap to nearest edge fully on long press too
+            snapToEdge(0)
         }
 
         // ── Add to window ─────────────────────────────────────────────────────
@@ -343,16 +427,16 @@ class OverlayService : Service() {
                 svc.connect()
                 android.util.Log.d("OverlayService", "Avatar tapped — reconnecting broken connection.")
             } else {
-                android.util.Log.d("OverlayService", "Avatar tapped — already active, doing nothing.")
+                android.util.Log.d("OverlayService", "Avatar tapped while active — reserved for future action.")
             }
         } else {
             android.util.Log.d("OverlayService", "Avatar tapped but BackgroundVoiceService not bound yet.")
         }
     }
 
-    private fun snapToEdge() {
+    private fun snapToEdge(marginDp: Int = 16) {
         val screenWidth = resources.displayMetrics.widthPixels
-        val margin = (16 * resources.displayMetrics.density).toInt()
+        val margin = (marginDp * resources.displayMetrics.density).toInt()
         val centerX = layoutParams.x + (layoutParams.width / 2)
         layoutParams.x = if (centerX < screenWidth / 2) margin else screenWidth - layoutParams.width - margin
         try {
@@ -379,11 +463,21 @@ class OverlayService : Service() {
         val stopPendingIntent = PendingIntent.getService(
             this, 1, stopIntent, PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
         )
+
+        val toggleIntent = Intent(this, OverlayService::class.java).apply { action = ACTION_TOGGLE_BANKING_PAUSE }
+        val togglePendingIntent = PendingIntent.getService(
+            this, 2, toggleIntent, PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+        )
+
+        val toggleTitle = if (isHiddenForBanking) "Resume Soltini" else "Pause (Banking)"
+        val contentText = if (isHiddenForBanking) "Paused for Banking app safety" else "Soltini is running"
+
         return NotificationCompat.Builder(this, CHANNEL_ID)
             .setContentTitle("Soltini")
-            .setContentText("Soltini is running")
+            .setContentText(contentText)
             .setSmallIcon(android.R.drawable.ic_dialog_info)
             .setContentIntent(pendingIntent)
+            .addAction(android.R.drawable.ic_media_pause, toggleTitle, togglePendingIntent)
             .addAction(android.R.drawable.ic_menu_close_clear_cancel, "Stop", stopPendingIntent)
             .setPriority(NotificationCompat.PRIORITY_LOW)
             .build()

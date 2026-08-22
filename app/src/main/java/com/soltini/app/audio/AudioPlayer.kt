@@ -78,24 +78,51 @@ class AudioPlayer {
     private fun startPlaybackLoop() {
         playbackJob = CoroutineScope(Dispatchers.IO).launch {
             var playChunkCount = 0
+            var totalFramesWritten = 0L
+            var queueEmptySince = 0L
+
             while (isPlaying) {
                 val chunk = audioQueue.poll()
                 if (chunk != null && chunk.isNotEmpty()) {
                     _isSpeaking.value = true
+                    queueEmptySince = 0L
                     calculateAmplitude(chunk)
 
                     val written = audioTrack?.write(chunk, 0, chunk.size) ?: 0
                     if (written < 0) {
                         AppLogger.e(TAG, "AudioTrack write error code: $written")
                     } else {
+                        // Track total PCM frames written (2 bytes per frame for 16-bit mono)
+                        totalFramesWritten += written / 2
                         playChunkCount++
                         if (playChunkCount % 50 == 1) {
                             AppLogger.d(TAG, "Writing bytes to AudioTrack: chunk #$playChunkCount (${chunk.size} bytes)")
                         }
                     }
                 } else {
-                    _isSpeaking.value = false
-                    _speakerAmplitude.value = 0f
+                    // Queue is empty — but audio may still be playing in hardware buffer.
+                    // Calculate how many frames the hardware has actually played using playbackHeadPosition.
+                    if (_isSpeaking.value) {
+                        if (queueEmptySince == 0L) {
+                            queueEmptySince = System.currentTimeMillis()
+                        }
+                        val track = audioTrack
+                        val hardwareDone = if (track != null) {
+                            val headPosition = track.playbackHeadPosition.toLong()
+                            // playbackHeadPosition wraps at Int.MAX_VALUE — normalise it
+                            val normHead = headPosition and 0xFFFFFFFFL
+                            normHead >= (totalFramesWritten and 0xFFFFFFFFL)
+                        } else {
+                            true
+                        }
+                        if (hardwareDone) {
+                            // Audio has fully drained from the hardware DAC
+                            _isSpeaking.value = false
+                            _speakerAmplitude.value = 0f
+                            totalFramesWritten = 0L
+                            AppLogger.d(TAG, "AudioTrack hardware drain complete — mic unmuting")
+                        }
+                    }
                     Thread.sleep(10)
                 }
             }

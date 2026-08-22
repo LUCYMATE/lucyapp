@@ -51,9 +51,12 @@ import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.Mic
 import androidx.compose.material.icons.filled.MicOff
+import androidx.compose.material.icons.filled.Pause
+import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.SmartToy
+import androidx.compose.material.icons.filled.Warning
 import androidx.compose.material.icons.filled.Wifi
 import androidx.compose.material.icons.filled.WifiOff
 import androidx.compose.material3.Card
@@ -122,9 +125,29 @@ fun VoiceScreen(
     val isSpeaking by viewModel.isSpeaking.collectAsStateWithLifecycle()
     val transcripts by viewModel.transcripts.collectAsStateWithLifecycle()
     val hasMicPermission by viewModel.hasMicPermission.collectAsStateWithLifecycle()
+    val isLitePaused by viewModel.isLitePaused.collectAsStateWithLifecycle()
+    val isHardPaused by viewModel.isHardPaused.collectAsStateWithLifecycle()
+    val isPaused = isLitePaused || isHardPaused
 
-    LaunchedEffect(hasMicPermission, connectionState) {
-        if (hasMicPermission && (connectionState == ConnectionState.Disconnected || connectionState == ConnectionState.Error)) {
+    val onToggleLite = { viewModel.toggleLitePauseMode() }
+    val onToggleHard = { 
+        val wasHardPaused = isHardPaused
+        viewModel.toggleHardPauseMode()
+        
+        if (!wasHardPaused) {
+            try {
+                val intent = android.content.Intent(android.provider.Settings.ACTION_APPLICATION_DETAILS_SETTINGS).apply {
+                    data = android.net.Uri.fromParts("package", context.packageName, null)
+                }
+                context.startActivity(intent)
+            } catch (e: Exception) {
+                // Fallback
+            }
+        }
+    }
+
+    LaunchedEffect(hasMicPermission, connectionState, isPaused) {
+        if (hasMicPermission && !isPaused && (connectionState == ConnectionState.Disconnected || connectionState == ConnectionState.Error)) {
             viewModel.connect()
         }
     }
@@ -171,8 +194,19 @@ fun VoiceScreen(
                         connectionState = connectionState,
                         isSpeaking = isSpeaking,
                         isMuted = isMuted,
+                        isPaused = isPaused,
                         amplitude = activeAmplitude,
                         onToggleMute = { viewModel.toggleMute() }
+                    )
+                }
+
+                // ── Banking Pause Mode Card ──────────────────────────────────
+                item {
+                    DualPauseModeCard(
+                        isLitePaused = isLitePaused,
+                        isHardPaused = isHardPaused,
+                        onToggleLite = { viewModel.toggleLitePauseMode() },
+                        onToggleHard = { viewModel.toggleHardPauseMode() }
                     )
                 }
 
@@ -334,10 +368,11 @@ private fun HeroWaveCard(
     connectionState: ConnectionState,
     isSpeaking: Boolean,
     isMuted: Boolean,
+    isPaused: Boolean,
     amplitude: Float,
     onToggleMute: () -> Unit
 ) {
-    val isLive = connectionState == ConnectionState.Live
+    val isLive = connectionState == ConnectionState.Live && !isPaused
     val animAmp by animateFloatAsState(amplitude, tween(80), label = "amp")
 
     val waveColor = when {
@@ -349,6 +384,7 @@ private fun HeroWaveCard(
     val animWaveColor by animateColorAsState(waveColor, tween(500), label = "wave")
 
     val statusText = when {
+        isPaused -> "⏸ Paused — accessibility & mic fully off"
         !isLive -> "Disconnected — tap ↻ to reconnect"
         isMuted -> "Microphone muted"
         isSpeaking -> "Soltini is speaking..."
@@ -682,6 +718,214 @@ private fun ErrorCard(error: String, onRetry: () -> Unit) {
         }
     }
 }
+
+// ── Pause Mode Card ────────────────────────────────────────────────────────────
+@Composable
+private fun PauseModeCard(
+    isPaused: Boolean,
+    onToggle: () -> Unit
+) {
+    // Delegate to the full dual-mode card with just lite pause
+    DualPauseModeCard(
+        isLitePaused = isPaused,
+        isHardPaused = false,
+        onToggleLite = onToggle,
+        onToggleHard = {}
+    )
+}
+
+@Composable
+fun DualPauseModeCard(
+    isLitePaused: Boolean,
+    isHardPaused: Boolean,
+    onToggleLite: () -> Unit,
+    onToggleHard: () -> Unit
+) {
+    val isAnyPaused = isLitePaused || isHardPaused
+
+    val inf = rememberInfiniteTransition(label = "pausePulse")
+    val pulseAlpha by inf.animateFloat(
+        initialValue = if (isAnyPaused) 0.3f else 0.04f,
+        targetValue  = if (isAnyPaused) 0.6f else 0.14f,
+        animationSpec = infiniteRepeatable(
+            tween(if (isAnyPaused) 700 else 2400, easing = FastOutSlowInEasing),
+            RepeatMode.Reverse
+        ),
+        label = "pulseAlpha"
+    )
+
+    val liteColor = Color(0xFFFF8C00)  // amber
+    val hardColor = Color(0xFFE53935)  // red
+    val idleColor = AccentBlue
+
+    val headerColor = when {
+        isHardPaused -> hardColor
+        isLitePaused -> liteColor
+        else         -> idleColor
+    }
+    val animHeaderColor by animateColorAsState(headerColor, tween(350), label = "hc")
+
+    Column(modifier = Modifier.fillMaxWidth()) {
+        // Section label
+        Text(
+            "Banking Mode",
+            color = TextSecondary,
+            fontSize = 12.sp,
+            fontWeight = FontWeight.SemiBold,
+            modifier = androidx.compose.ui.Modifier.padding(bottom = 8.dp)
+        )
+
+        Card(
+            modifier = Modifier.fillMaxWidth(),
+            colors = CardDefaults.cardColors(
+                containerColor = animHeaderColor.copy(alpha = 0.06f + pulseAlpha * 0.4f)
+            ),
+            shape = RoundedCornerShape(20.dp),
+            border = androidx.compose.foundation.BorderStroke(
+                1.5.dp, animHeaderColor.copy(alpha = 0.25f + pulseAlpha)
+            )
+        ) {
+            Column(modifier = Modifier.padding(16.dp)) {
+
+                // ── Status banner ────────────────────────────────────────────
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    modifier = Modifier.padding(bottom = 14.dp)
+                ) {
+                    Box(
+                        modifier = Modifier
+                            .size(40.dp)
+                            .clip(CircleShape)
+                            .background(animHeaderColor.copy(alpha = 0.15f + pulseAlpha)),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Icon(
+                            imageVector = when {
+                                isHardPaused -> Icons.Default.Warning
+                                isLitePaused -> Icons.Default.Pause
+                                else         -> Icons.Default.Lock
+                            },
+                            contentDescription = null,
+                            tint = animHeaderColor,
+                            modifier = Modifier.size(22.dp)
+                        )
+                    }
+                    Spacer(modifier = Modifier.width(12.dp))
+                    Column {
+                        Text(
+                            text = when {
+                                isHardPaused -> "Force Stopped — Open app to resume"
+                                isLitePaused -> "Lite Paused — Accessibility silenced"
+                                else         -> "Pause for Banking Apps"
+                            },
+                            color = TextPrimary,
+                            fontWeight = FontWeight.Bold,
+                            fontSize = 14.sp
+                        )
+                        Text(
+                            text = when {
+                                isHardPaused -> "Opening Settings → Accessibility on resume"
+                                isLitePaused -> "Mic & AI off. Instant resume, no re-enable."
+                                else         -> "Choose a pause level below"
+                            },
+                            color = if (isAnyPaused) animHeaderColor.copy(0.85f) else TextSecondary,
+                            fontSize = 11.sp
+                        )
+                    }
+                }
+
+                // ── Two buttons ──────────────────────────────────────────────
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(10.dp)
+                ) {
+                    // Lite Pause button
+                    val liteActive = isLitePaused
+                    Box(
+                        modifier = Modifier
+                            .weight(1f)
+                            .clip(RoundedCornerShape(14.dp))
+                            .background(
+                                if (liteActive) liteColor.copy(0.18f)
+                                else DarkSurface
+                            )
+                            .border(
+                                1.dp,
+                                if (liteActive) liteColor.copy(0.6f) else DarkBorder,
+                                RoundedCornerShape(14.dp)
+                            )
+                            .clickable { onToggleLite() }
+                            .padding(12.dp)
+                    ) {
+                        Column(horizontalAlignment = Alignment.CenterHorizontally,
+                               modifier = Modifier.fillMaxWidth()) {
+                            Icon(
+                                imageVector = if (liteActive) Icons.Default.PlayArrow else Icons.Default.Pause,
+                                contentDescription = null,
+                                tint = if (liteActive) liteColor else TextSecondary,
+                                modifier = Modifier.size(20.dp)
+                            )
+                            Spacer(Modifier.height(6.dp))
+                            Text(
+                                if (liteActive) "Resume" else "Lite Pause",
+                                color = if (liteActive) liteColor else TextPrimary,
+                                fontWeight = FontWeight.SemiBold,
+                                fontSize = 13.sp
+                            )
+                            Text(
+                                "GPay · PhonePe · Paytm",
+                                color = TextSecondary,
+                                fontSize = 10.sp
+                            )
+                        }
+                    }
+
+                    // Hard Pause button
+                    val hardActive = isHardPaused
+                    Box(
+                        modifier = Modifier
+                            .weight(1f)
+                            .clip(RoundedCornerShape(14.dp))
+                            .background(
+                                if (hardActive) hardColor.copy(0.18f)
+                                else DarkSurface
+                            )
+                            .border(
+                                1.dp,
+                                if (hardActive) hardColor.copy(0.6f) else DarkBorder,
+                                RoundedCornerShape(14.dp)
+                            )
+                            .clickable { onToggleHard() }
+                            .padding(12.dp)
+                    ) {
+                        Column(horizontalAlignment = Alignment.CenterHorizontally,
+                               modifier = Modifier.fillMaxWidth()) {
+                            Icon(
+                                imageVector = if (hardActive) Icons.Default.PlayArrow else Icons.Default.Warning,
+                                contentDescription = null,
+                                tint = if (hardActive) hardColor else TextSecondary,
+                                modifier = Modifier.size(20.dp)
+                            )
+                            Spacer(Modifier.height(6.dp))
+                            Text(
+                                if (hardActive) "Resume" else "Force Stop",
+                                color = if (hardActive) hardColor else TextPrimary,
+                                fontWeight = FontWeight.SemiBold,
+                                fontSize = 13.sp
+                            )
+                            Text(
+                                "HDFC · ICICI · SBI",
+                                color = TextSecondary,
+                                fontSize = 10.sp
+                            )
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
 
 // ── Permission check helpers for home ─────────────────────────────────────────
 private fun checkAssistantRoleHome(context: Context): Boolean {

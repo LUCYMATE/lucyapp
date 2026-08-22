@@ -69,6 +69,7 @@ import androidx.compose.material.icons.filled.KeyboardArrowLeft
 import androidx.compose.material.icons.filled.KeyboardArrowRight
 import androidx.compose.material.icons.filled.Security
 import androidx.compose.material.icons.filled.Memory
+import androidx.compose.material.icons.filled.AutoAwesome
 import androidx.activity.compose.BackHandler
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
@@ -78,10 +79,13 @@ import androidx.compose.material3.FilterChip
 import androidx.compose.material3.FilterChipDefaults
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
+import androidx.compose.material3.Switch
+import androidx.compose.material3.SwitchDefaults
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.getValue
@@ -120,6 +124,7 @@ import com.soltini.app.ui.theme.TextSecondary
 
 private val AmberWarning = Color(0xFFFFA726)
 private val Purple = Color(0xFF9C27B0)
+private val MiuiOrange = Color(0xFFFF6D00)
 
 enum class SettingsRoute { MAIN, PERMISSIONS, API, MEMORY }
 
@@ -356,6 +361,9 @@ fun SettingsScreen(
                 }
             )
 
+            Spacer(modifier = Modifier.height(12.dp))
+            BankingProtectionCard(context = context)
+
             // Restricted settings warning for Android 13+ sideloaded APKs
             if (!hasRestrictedSettings && !hasAccessibility) {
                 Spacer(modifier = Modifier.height(10.dp))
@@ -401,9 +409,43 @@ fun SettingsScreen(
                 )
             }
 
-            if (Build.MANUFACTURER.equals("Xiaomi", ignoreCase = true) || Build.MANUFACTURER.equals("POCO", ignoreCase = true) || Build.MANUFACTURER.equals("Redmi", ignoreCase = true)) {
+            val isMiuiDevice = Build.MANUFACTURER.equals("Xiaomi", ignoreCase = true) ||
+                Build.MANUFACTURER.equals("POCO", ignoreCase = true) ||
+                Build.MANUFACTURER.equals("Redmi", ignoreCase = true)
+
+            if (isMiuiDevice) {
                 Spacer(modifier = Modifier.height(10.dp))
-                XiaomiWarningCard()
+                // MIUI-specific battery "No restrictions" deeplink card
+                PermissionCard(
+                    icon = Icons.Default.BatteryAlert,
+                    title = "MIUI Battery — No Restrictions",
+                    description = "Android battery optimization often isn't enough on MIUI. Set Battery saver to \"No restrictions\" in your app's settings.",
+                    isGranted = false, // cannot be programmatically checked; always shows action
+                    tier = PermTier.RECOMMENDED,
+                    onGrant = {
+                        // Try MIUI PowerKeeper first, fall back to App Details
+                        val miuiIntent = android.content.Intent().apply {
+                            component = android.content.ComponentName(
+                                "com.miui.powerkeeper",
+                                "com.miui.powerkeeper.ui.HiddenAppsContainerManagementActivity"
+                            )
+                            addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK)
+                        }
+                        val resolved = context.packageManager.resolveActivity(miuiIntent, 0)
+                        if (resolved != null) {
+                            try { context.startActivity(miuiIntent) } catch (_: Exception) {}
+                        } else {
+                            context.startActivity(
+                                android.content.Intent(
+                                    android.provider.Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
+                                    android.net.Uri.parse("package:${context.packageName}")
+                                ).addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK)
+                            )
+                        }
+                    }
+                )
+                Spacer(modifier = Modifier.height(10.dp))
+                XiaomiActionsCard(context = context)
             }
 
             Spacer(modifier = Modifier.height(28.dp))
@@ -624,37 +666,132 @@ private fun RestrictedSettingsCard() {
     }
 }
 
-// ── Xiaomi Warning ────────────────────────────────────────────────────────────
+// ── Xiaomi Actions Card ───────────────────────────────────────────────────────
 @Composable
-private fun XiaomiWarningCard() {
+private fun XiaomiActionsCard(context: android.content.Context) {
     Card(
         modifier = Modifier.fillMaxWidth(),
-        colors = CardDefaults.cardColors(containerColor = RedError.copy(alpha = 0.1f)),
+        colors = CardDefaults.cardColors(containerColor = MiuiOrange.copy(alpha = 0.07f)),
         shape = RoundedCornerShape(14.dp),
-        border = androidx.compose.foundation.BorderStroke(1.dp, RedError.copy(alpha = 0.3f))
+        border = androidx.compose.foundation.BorderStroke(1.dp, MiuiOrange.copy(alpha = 0.35f))
     ) {
-        Row(modifier = Modifier.padding(14.dp), verticalAlignment = Alignment.Top) {
-            Icon(Icons.Default.Warning, null, tint = RedError, modifier = Modifier.size(20.dp))
-            Spacer(modifier = Modifier.width(10.dp))
-            Column {
+        Column(modifier = Modifier.padding(14.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Icon(Icons.Default.Warning, null, tint = MiuiOrange, modifier = Modifier.size(20.dp))
+                Spacer(modifier = Modifier.width(10.dp))
                 Text(
-                    "Redmi / Xiaomi Warning",
-                    color = RedError,
+                    "MIUI Background Kill Protection",
+                    color = MiuiOrange,
                     fontWeight = FontWeight.Bold,
                     fontSize = 13.sp
                 )
-                Spacer(modifier = Modifier.height(4.dp))
-                Text(
-                    "Your phone aggressively kills apps when you swipe them away. This breaks the Accessibility Service.\n\n" +
-                            "To fix this forever:\n" +
-                            "1. Open the Recents (Recent Apps) menu.\n" +
-                            "2. Long-press on the Soltini app card.\n" +
-                            "3. Tap the Padlock (🔒) icon to lock it.\n\n" +
-                            "Once locked, swiping it away won't break Accessibility!",
-                    color = TextSecondary,
-                    fontSize = 12.sp,
-                    lineHeight = 18.sp
-                )
+            }
+            Spacer(modifier = Modifier.height(8.dp))
+            Text(
+                "Your phone aggressively kills background apps. Use the buttons below to open each setting:",
+                color = TextSecondary,
+                fontSize = 12.sp,
+                lineHeight = 17.sp
+            )
+            Spacer(modifier = Modifier.height(12.dp))
+
+            // Autostart button
+            MiuiActionRow(
+                label = "1. Open Autostart Settings",
+                hint = "Security → Permissions → Autostart → toggle ON",
+                buttonLabel = "Open",
+                color = MiuiOrange
+            ) {
+                val intent = android.content.Intent().apply {
+                    component = android.content.ComponentName(
+                        "com.miui.securitycenter",
+                        "com.miui.permcenter.autostart.AutoStartManagementActivity"
+                    )
+                    addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK)
+                }
+                val resolved = context.packageManager.resolveActivity(intent, 0)
+                if (resolved != null) {
+                    try { context.startActivity(intent) } catch (_: Exception) {} 
+                } else {
+                    try {
+                        context.startActivity(
+                            android.content.Intent(
+                                android.provider.Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
+                                android.net.Uri.parse("package:${context.packageName}")
+                            ).addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK)
+                        )
+                    } catch (_: Exception) {}
+                }
+            }
+
+            Spacer(modifier = Modifier.height(8.dp))
+
+            // Lock in recents — no deeplink, just instructions
+            MiuiActionRow(
+                label = "2. Lock in Recent Apps",
+                hint = "Recents → Long-press Soltini card → tap 🔒 lock icon",
+                buttonLabel = null,
+                color = AccentBlue
+            ) {}
+
+            Spacer(modifier = Modifier.height(10.dp))
+
+            // Re-trigger full onboarding guide
+            OutlinedButton(
+                onClick = {
+                    context.getSharedPreferences("app_prefs", android.content.Context.MODE_PRIVATE)
+                        .edit().putBoolean("miui_onboarding_complete", false).apply()
+                    // Prompt user to relaunch
+                    android.widget.Toast.makeText(
+                        context,
+                        "Relaunch Soltini to see the full setup guide",
+                        android.widget.Toast.LENGTH_LONG
+                    ).show()
+                },
+                modifier = Modifier.fillMaxWidth(),
+                colors = androidx.compose.material3.ButtonDefaults.outlinedButtonColors(
+                    contentColor = MiuiOrange
+                ),
+                border = androidx.compose.foundation.BorderStroke(1.dp, MiuiOrange.copy(0.5f)),
+                shape = RoundedCornerShape(10.dp)
+            ) {
+                Icon(Icons.Default.AutoAwesome, null, modifier = Modifier.size(16.dp))
+                Spacer(modifier = Modifier.width(6.dp))
+                Text("Re-open Xiaomi Setup Guide", fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
+            }
+        }
+    }
+}
+
+@Composable
+private fun MiuiActionRow(
+    label: String,
+    hint: String,
+    buttonLabel: String?,
+    color: Color,
+    onClick: () -> Unit
+) {
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Column(modifier = Modifier.weight(1f)) {
+            Text(label, color = TextPrimary, fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
+            Text(hint, color = TextSecondary, fontSize = 11.sp, lineHeight = 15.sp)
+        }
+        if (buttonLabel != null) {
+            Spacer(modifier = Modifier.width(8.dp))
+            Button(
+                onClick = onClick,
+                colors = ButtonDefaults.buttonColors(
+                    containerColor = color.copy(alpha = 0.18f),
+                    contentColor = color
+                ),
+                shape = RoundedCornerShape(8.dp),
+                modifier = Modifier.height(34.dp),
+                contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 12.dp)
+            ) {
+                Text(buttonLabel, fontSize = 12.sp, fontWeight = FontWeight.Bold)
             }
         }
     }
@@ -832,11 +969,16 @@ fun AiConfigSection(
     onSaveAndReconnect: () -> Unit
 ) {
     // Local draft state — only written to AppSettings on Save
-    var apiKey    by remember { mutableStateOf(appSettings?.geminiApiKey ?: "") }
-    var persona   by remember { mutableStateOf(appSettings?.aiPersona ?: AppSettings.DEFAULT_PERSONA) }
-    var voice     by remember { mutableStateOf(appSettings?.voiceName ?: AppSettings.DEFAULT_VOICE) }
-    var showKey   by remember { mutableStateOf(false) }
-    var saved     by remember { mutableStateOf(false) }
+    var apiKey      by remember { mutableStateOf(appSettings?.geminiApiKey ?: "") }
+    var persona     by remember { mutableStateOf(appSettings?.aiPersona ?: AppSettings.DEFAULT_PERSONA) }
+    var voice       by remember { mutableStateOf(appSettings?.voiceName ?: AppSettings.DEFAULT_VOICE) }
+    var isDataSaver by remember { mutableStateOf(appSettings?.isDataSaverEnabled ?: true) }
+    var vadSens     by remember { mutableStateOf(appSettings?.vadSensitivity ?: AppSettings.SENSITIVITY_BALANCED) }
+    var micGain     by remember { mutableStateOf(appSettings?.micGain ?: 1.5f) }
+    var autoSleep   by remember { mutableStateOf(appSettings?.autoSleepMinutes ?: 3) }
+    var isScreenRecMode by remember { mutableStateOf(appSettings?.isScreenRecordingModeEnabled ?: false) }
+    var showKey     by remember { mutableStateOf(false) }
+    var saved       by remember { mutableStateOf(false) }
 
     SectionLabel("⚙️  AI Configuration")
     Spacer(Modifier.height(12.dp))
@@ -957,14 +1099,176 @@ fun AiConfigSection(
                 }
             }
 
+            Spacer(Modifier.height(18.dp))
+
+            // ── Mic Volume Soft Boost (Fixes Gemini ignoring voice) ──────────
+            Column {
+                Text("Microphone Volume Boost", color = TextPrimary, fontWeight = FontWeight.SemiBold, fontSize = 14.sp)
+                Text("Amplifies soft speech so Gemini hears you loud and clear every time.", color = TextSecondary, fontSize = 11.sp, lineHeight = 15.sp)
+                Spacer(Modifier.height(8.dp))
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    listOf(
+                        1.0f to "1.0x (Normal)",
+                        1.5f to "1.5x (Boosted)",
+                        2.0f to "2.0x (Loud)"
+                    ).forEach { (g, label) ->
+                        val selected = (micGain == g)
+                        FilterChip(
+                            selected = selected,
+                            onClick = { micGain = g; saved = false },
+                            label = { Text(label, fontSize = 12.sp) },
+                            colors = FilterChipDefaults.filterChipColors(
+                                selectedContainerColor = ChipSelected,
+                                selectedLabelColor = Color.White,
+                                containerColor = ChipUnselected,
+                                labelColor = TextSecondary
+                            ),
+                            border = FilterChipDefaults.filterChipBorder(
+                                enabled = true,
+                                selected = selected,
+                                selectedBorderColor = ChipSelected,
+                                borderColor = Color(0xFF2A2F4A)
+                            )
+                        )
+                    }
+                }
+            }
+
+            Spacer(Modifier.height(18.dp))
+
+            // ── Auto-Sleep Idle Timeout (Eliminates daily background data burn) ─
+            Column {
+                Text("Auto-Sleep Idle Timeout", color = TextPrimary, fontWeight = FontWeight.SemiBold, fontSize = 14.sp)
+                Text("Disconnects Gemini & stops mic after inactivity. Saves 100% data while idle.", color = TextSecondary, fontSize = 11.sp, lineHeight = 15.sp)
+                Spacer(Modifier.height(8.dp))
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    listOf(
+                        1 to "1 Min",
+                        3 to "3 Mins",
+                        5 to "5 Mins",
+                        0 to "Disabled"
+                    ).forEach { (mins, label) ->
+                        val selected = (autoSleep == mins)
+                        FilterChip(
+                            selected = selected,
+                            onClick = { autoSleep = mins; saved = false },
+                            label = { Text(label, fontSize = 12.sp) },
+                            colors = FilterChipDefaults.filterChipColors(
+                                selectedContainerColor = ChipSelected,
+                                selectedLabelColor = Color.White,
+                                containerColor = ChipUnselected,
+                                labelColor = TextSecondary
+                            ),
+                            border = FilterChipDefaults.filterChipBorder(
+                                enabled = true,
+                                selected = selected,
+                                selectedBorderColor = ChipSelected,
+                                borderColor = Color(0xFF2A2F4A)
+                            )
+                        )
+                    }
+                }
+            }
+
+            Spacer(Modifier.height(18.dp))
+
+            // ── Data Saver & Voice Activity Detection (VAD) ─────────────────
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.SpaceBetween
+            ) {
+                Column(modifier = Modifier.weight(1f)) {
+                    Text("Data Saver (Silence Suppression)", color = TextPrimary, fontWeight = FontWeight.SemiBold, fontSize = 14.sp)
+                    Text("Stops streaming mic data during silence.", color = TextSecondary, fontSize = 11.sp, lineHeight = 15.sp)
+                }
+                Spacer(Modifier.width(8.dp))
+                androidx.compose.material3.Switch(
+                    checked = isDataSaver,
+                    onCheckedChange = { isDataSaver = it; saved = false },
+                    colors = androidx.compose.material3.SwitchDefaults.colors(
+                        checkedThumbColor = GreenLive,
+                        checkedTrackColor = GreenLive.copy(alpha = 0.3f)
+                    )
+                )
+            }
+
+            if (isDataSaver) {
+                Spacer(Modifier.height(10.dp))
+                Text("VAD Mic Sensitivity", color = TextPrimary, fontWeight = FontWeight.SemiBold, fontSize = 13.sp)
+                Spacer(Modifier.height(6.dp))
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    AppSettings.AVAILABLE_SENSITIVITIES.forEach { s ->
+                        val selected = (s == vadSens)
+                        FilterChip(
+                            selected = selected,
+                            onClick = { vadSens = s; saved = false },
+                            label = { Text(s, fontSize = 12.sp) },
+                            colors = FilterChipDefaults.filterChipColors(
+                                selectedContainerColor = ChipSelected,
+                                selectedLabelColor = Color.White,
+                                containerColor = ChipUnselected,
+                                labelColor = TextSecondary
+                            ),
+                            border = FilterChipDefaults.filterChipBorder(
+                                enabled = true,
+                                selected = selected,
+                                selectedBorderColor = ChipSelected,
+                                borderColor = Color(0xFF2A2F4A)
+                            )
+                        )
+                    }
+                }
+            }
+
+            Spacer(Modifier.height(16.dp))
+
+            // ── Screen Recording Mode ───────────────────────────────────────
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Column(modifier = Modifier.weight(1f)) {
+                    Text("Screen Recording Mode", color = TextPrimary, fontWeight = FontWeight.SemiBold, fontSize = 14.sp)
+                    Text(
+                        "Fixes echo loops when recording internal audio. Enable this if AI gets stuck listening to itself during screen records.",
+                        color = TextSecondary, fontSize = 12.sp, lineHeight = 16.sp
+                    )
+                }
+                Switch(
+                    checked = isScreenRecMode,
+                    onCheckedChange = { isScreenRecMode = it },
+                    colors = SwitchDefaults.colors(
+                        checkedThumbColor = Color.White,
+                        checkedTrackColor = AccentPurple,
+                        uncheckedThumbColor = TextSecondary,
+                        uncheckedTrackColor = Color(0xFF1E2132)
+                    )
+                )
+            }
+
             Spacer(Modifier.height(20.dp))
 
             // ── Save & Reconnect button ──────────────────────────────────────
             Button(
                 onClick = {
-                    appSettings?.geminiApiKey = apiKey
-                    appSettings?.aiPersona    = persona
-                    appSettings?.voiceName    = voice
+                    appSettings?.geminiApiKey       = apiKey
+                    appSettings?.aiPersona          = persona
+                    appSettings?.voiceName          = voice
+                    appSettings?.isDataSaverEnabled = isDataSaver
+                    appSettings?.vadSensitivity     = vadSens
+                    appSettings?.micGain            = micGain
+                    appSettings?.autoSleepMinutes   = autoSleep
+                    appSettings?.isScreenRecordingModeEnabled = isScreenRecMode
                     saved = true
                     onSaveAndReconnect()
                 },
@@ -1120,4 +1424,133 @@ fun MemorySection(memoryManager: com.soltini.app.memory.MemoryManager?) {
         }
     }
 }
+
+@Composable
+private fun BankingProtectionCard(context: Context) {
+    val appSettings = remember { AppSettings(context) }
+    var autoHideEnabled by remember { mutableStateOf(appSettings.isBankingProtectionEnabled) }
+    var isPaused by remember { mutableStateOf(appSettings.isBankingModePaused || (com.soltini.app.overlay.OverlayService.getInstance()?.isHiddenForBanking() == true)) }
+
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        colors = CardDefaults.cardColors(containerColor = DarkSurface),
+        shape = RoundedCornerShape(16.dp),
+        border = androidx.compose.foundation.BorderStroke(1.dp, AccentBlue.copy(alpha = 0.35f))
+    ) {
+        Column(modifier = Modifier.padding(16.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Box(
+                    modifier = Modifier
+                        .size(44.dp)
+                        .clip(RoundedCornerShape(12.dp))
+                        .background(AccentBlue.copy(alpha = 0.15f)),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Icon(Icons.Default.Security, contentDescription = null, tint = AccentBlue, modifier = Modifier.size(24.dp))
+                }
+                Spacer(modifier = Modifier.width(12.dp))
+                Column(modifier = Modifier.weight(1f)) {
+                    Text("Banking App Protection", color = TextPrimary, fontWeight = FontWeight.Bold, fontSize = 16.sp)
+                    Text("Fixes banking apps (GPay, PhonePe, Paytm, YONO, SBI, HDFC) closing or blocking launch", color = TextSecondary, fontSize = 12.sp, lineHeight = 16.sp)
+                }
+            }
+
+            Spacer(modifier = Modifier.height(14.dp))
+
+            // Auto-Hide Switch
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.SpaceBetween
+            ) {
+                Column(modifier = Modifier.weight(1f)) {
+                    Text("Auto-Hide Overlay & A11y", color = TextPrimary, fontWeight = FontWeight.SemiBold, fontSize = 13.sp)
+                    Text("Auto-hides floating orb & pauses screen reading whenever a banking app comes to foreground", color = TextSecondary, fontSize = 11.sp, lineHeight = 15.sp)
+                }
+                Spacer(modifier = Modifier.width(8.dp))
+                androidx.compose.material3.Switch(
+                    checked = autoHideEnabled,
+                    onCheckedChange = { checked ->
+                        autoHideEnabled = checked
+                        appSettings.isBankingProtectionEnabled = checked
+                    },
+                    colors = androidx.compose.material3.SwitchDefaults.colors(
+                        checkedThumbColor = AccentBlue,
+                        checkedTrackColor = AccentBlue.copy(alpha = 0.3f)
+                    )
+                )
+            }
+
+            Spacer(modifier = Modifier.height(12.dp))
+
+            // Manual Pause Toggle Button
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.SpaceBetween
+            ) {
+                Column(modifier = Modifier.weight(1f)) {
+                    Text("Manual Pause (Banking Mode)", color = TextPrimary, fontWeight = FontWeight.SemiBold, fontSize = 13.sp)
+                    Text(if (isPaused) "Overlay is PAUSED right now" else "Overlay is ACTIVE", color = if (isPaused) AmberWarning else GreenLive, fontSize = 11.sp)
+                }
+                Spacer(modifier = Modifier.width(8.dp))
+                Button(
+                    onClick = {
+                        val newState = !isPaused
+                        isPaused = newState
+                        appSettings.isBankingModePaused = newState
+                        com.soltini.app.overlay.OverlayService.getInstance()?.setHiddenForBanking(newState)
+                    },
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = if (isPaused) GreenLive.copy(alpha = 0.2f) else AmberWarning.copy(alpha = 0.2f),
+                        contentColor = if (isPaused) GreenLive else AmberWarning
+                    ),
+                    shape = RoundedCornerShape(10.dp),
+                    modifier = Modifier.height(36.dp)
+                ) {
+                    Text(if (isPaused) "Resume" else "Pause Now", fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                }
+            }
+
+            Spacer(modifier = Modifier.height(14.dp))
+
+            // Tip / Guidance Card
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clip(RoundedCornerShape(10.dp))
+                    .background(DarkSurfaceVariant)
+                    .padding(10.dp)
+            ) {
+                Column {
+                    Text("💡 Quick Control Tips:", color = AccentBlue, fontWeight = FontWeight.Bold, fontSize = 12.sp)
+                    Spacer(modifier = Modifier.height(2.dp))
+                    Text(
+                        "1. Notification Shade: Tap \"Pause (Banking)\" in Soltini's persistent notification.\n" +
+                        "2. Quick Tile: Add \"Soltini Banking Mode\" tile to your Android Quick Settings panel for 1-tap toggle.\n" +
+                        "3. If any bank insists on disabling Accessibility service completely, use the button below.",
+                        color = TextSecondary, fontSize = 11.sp, lineHeight = 16.sp
+                    )
+                }
+            }
+
+            Spacer(modifier = Modifier.height(10.dp))
+
+            OutlinedButton(
+                onClick = {
+                    context.startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS))
+                },
+                modifier = Modifier.fillMaxWidth(),
+                colors = ButtonDefaults.outlinedButtonColors(contentColor = TextPrimary),
+                border = androidx.compose.foundation.BorderStroke(1.dp, DarkBorder),
+                shape = RoundedCornerShape(10.dp)
+            ) {
+                Icon(Icons.Default.Accessibility, null, modifier = Modifier.size(16.dp), tint = TextSecondary)
+                Spacer(modifier = Modifier.width(6.dp))
+                Text("Open Accessibility Settings", fontSize = 12.sp, fontWeight = FontWeight.Medium)
+            }
+        }
+    }
+}
+
 

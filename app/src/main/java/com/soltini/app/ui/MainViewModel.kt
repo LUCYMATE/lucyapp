@@ -54,6 +54,15 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private val _transcripts = MutableStateFlow<List<TranscriptEntry>>(emptyList())
     val transcripts: StateFlow<List<TranscriptEntry>> = _transcripts.asStateFlow()
 
+    private val _isPaused = MutableStateFlow(false)
+    val isPaused: StateFlow<Boolean> = _isPaused.asStateFlow()
+
+    private val _isLitePaused = MutableStateFlow(false)
+    val isLitePaused: StateFlow<Boolean> = _isLitePaused.asStateFlow()
+
+    private val _isHardPaused = MutableStateFlow(false)
+    val isHardPaused: StateFlow<Boolean> = _isHardPaused.asStateFlow()
+
     private val connection = object : ServiceConnection {
         override fun onServiceConnected(className: ComponentName, service: IBinder) {
             val binder = service as BackgroundVoiceService.LocalBinder
@@ -91,6 +100,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             viewModelScope.launch { service.isMuted.collect { _isMuted.value = it } }
             viewModelScope.launch { service.hasMicPermission.collect { _hasMicPermission.value = it } }
             viewModelScope.launch { service.transcripts.collect { _transcripts.value = it } }
+            viewModelScope.launch { service.isPaused.collect {
+                _isPaused.value = it
+                _isLitePaused.value = it
+            }}
+            viewModelScope.launch { service.isHardPaused.collect { _isHardPaused.value = it } }
         }
     }
 
@@ -117,6 +131,21 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     /** Disconnects and reconnects to apply new API key / persona / voice settings. */
     fun reconnect() {
         voiceService?.reconnect()
+    }
+
+    /** Toggles Pause Mode: pauses everything including accessibility, or resumes. */
+    fun togglePauseMode() {
+        voiceService?.togglePauseMode()
+    }
+
+    /** Lite Pause: silences accessibility without disabling. Instant resume. */
+    fun toggleLitePauseMode() {
+        voiceService?.toggleLitePauseMode()
+    }
+
+    /** Hard Pause: calls disableSelf() for strict banks. Auto-opens settings on resume. */
+    fun toggleHardPauseMode() {
+        voiceService?.toggleHardPauseMode()
     }
 
     /** Gives Settings UI access to user-configurable AI settings. */

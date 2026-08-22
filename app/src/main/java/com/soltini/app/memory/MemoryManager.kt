@@ -87,14 +87,15 @@ class MemoryManager(
     /**
      * Formats retrieved memories as a system-instruction block to inject into
      * Gemini's setup message.
+     * Loads local memories directly without blocking network latency on startup.
      *
      * Returns empty string if there are no memories.
      */
-    suspend fun buildMemoryPrompt(contextQuery: String = "user preferences and personal info"): String {
-        val memories = retrieveRelevant(contextQuery)
-        if (memories.isEmpty()) return ""
+    suspend fun buildMemoryPrompt(contextQuery: String = "user preferences and personal info"): String = withContext(Dispatchers.IO) {
+        val memories = db.getAllMemories().take(TOP_K)
+        if (memories.isEmpty()) return@withContext ""
         val lines = memories.joinToString("\n") { "- ${it.content}" }
-        return "\n\nWHAT YOU REMEMBER ABOUT THIS USER:\n$lines\n"
+        "\n\nWHAT YOU REMEMBER ABOUT THIS USER:\n$lines\n"
     }
 
     /**

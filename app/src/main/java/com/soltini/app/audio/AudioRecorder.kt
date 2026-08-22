@@ -20,7 +20,8 @@ import kotlin.math.abs
  * Captures microphone audio at 16kHz 16-bit mono PCM for Gemini Live API streaming.
  */
 class AudioRecorder(
-    private val onAudioChunkCaptured: (ByteArray) -> Unit
+    private val onAudioChunkCaptured: (ByteArray) -> Unit,
+    var onSpeechStateChanged: ((Boolean) -> Unit)? = null
 ) {
 
     companion object {
@@ -38,6 +39,14 @@ class AudioRecorder(
     private var ns: NoiseSuppressor? = null
 
     var isMuted = false
+    var isDataSaverEnabled: Boolean = true
+    var vadThreshold: Float = 0.010f
+    var micGain: Float = 1.5f
+    var isModelSpeaking: Boolean = false
+    var isScreenRecordingModeEnabled: Boolean = false
+
+    // Auto-calibrating ambient noise floor
+    private var ambientNoiseFloor: Float = 0.005f
 
     private val _micAmplitude = MutableStateFlow(0f)
     val micAmplitude: StateFlow<Float> = _micAmplitude.asStateFlow()
@@ -109,11 +118,22 @@ class AudioRecorder(
                     val bytesRead = audioRecord?.read(buffer, 0, buffer.size) ?: -1
                     if (bytesRead > 0) {
                         errorCount = 0
-                        val chunk = buffer.copyOf(bytesRead)
-                        calculateAmplitude(chunk)
+                        val rawChunk = buffer.copyOf(bytesRead)
+                        val chunk = if (micGain != 1.0f) applySoftGain(rawChunk, micGain) else rawChunk
+                        val amp = calculateAmplitude(chunk)
 
                         if (!isMuted) {
-                            onAudioChunkCaptured(chunk)
+                            var outputChunk = chunk
+                            
+                            if (isScreenRecordingModeEnabled && isModelSpeaking) {
+                                // HARD MUTE: When Screen Recording Mode is ON, the mic is completely muted
+                                // while the AI is speaking. isModelSpeaking is now set to false only after
+                                // the AudioTrack hardware buffer fully drains, so this is precise and reliable.
+                                outputChunk = ByteArray(chunk.size)
+                            }
+                            
+                            onAudioChunkCaptured(outputChunk)
+                            onSpeechStateChanged?.invoke(amp > 0.005f)
                             chunkCount++
                             if (chunkCount % 100 == 1) {
                                 AppLogger.d(TAG, "AudioRecord captured chunk #$chunkCount ($bytesRead bytes)")
@@ -167,7 +187,22 @@ class AudioRecorder(
         }
     }
 
-    private fun calculateAmplitude(pcmData: ByteArray) {
+    private fun applySoftGain(pcmData: ByteArray, multiplier: Float): ByteArray {
+        if (multiplier == 1.0f) return pcmData
+        val boosted = ByteArray(pcmData.size)
+        var i = 0
+        while (i < pcmData.size - 1) {
+            val sample = (pcmData[i].toInt() and 0xFF) or (pcmData[i + 1].toInt() shl 8)
+            val shortSample = sample.toShort().toInt()
+            val scaled = (shortSample * multiplier).toInt().coerceIn(-32768, 32767)
+            boosted[i] = scaled.toByte()
+            boosted[i + 1] = (scaled shr 8).toByte()
+            i += 2
+        }
+        return boosted
+    }
+
+    private fun calculateAmplitude(pcmData: ByteArray): Float {
         var maxSample = 0
         var i = 0
         while (i < pcmData.size - 1) {
@@ -180,6 +215,7 @@ class AudioRecorder(
         }
         val norm = if (isMuted) 0f else (maxSample / 32768f).coerceIn(0f, 1f)
         _micAmplitude.value = norm
+        return norm
     }
 
     fun stopRecording() {

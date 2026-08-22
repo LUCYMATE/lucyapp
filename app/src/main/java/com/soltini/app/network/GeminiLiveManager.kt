@@ -62,6 +62,7 @@ class GeminiLiveManager(
     private val appSettings: AppSettings? = null,
     private val memoryManager: MemoryManager? = null
 ) {
+    private var cachedMemoryBlock: String = ""
 
     companion object {
         private const val TAG = "GeminiLiveManager"
@@ -119,6 +120,20 @@ class GeminiLiveManager(
 
         val url = "$WS_BASE_URL?key=$apiKey"
 
+        // Pre-fetch memories on IO BEFORE opening the WebSocket so the onOpen callback
+        // can call sendSetupMessage() without any blocking call.
+        managerScope.launch {
+            cachedMemoryBlock = try {
+                memoryManager?.buildMemoryPrompt() ?: ""
+            } catch (e: Exception) {
+                AppLogger.w(TAG, "Memory pre-fetch failed (non-fatal): ${e.message}")
+                ""
+            }
+            openWebSocket(url)
+        }
+    }
+
+    private fun openWebSocket(url: String) {
         client = OkHttpClient.Builder()
             .readTimeout(0, TimeUnit.MILLISECONDS)
             .pingInterval(20, TimeUnit.SECONDS)
@@ -203,46 +218,19 @@ class GeminiLiveManager(
                 ?: AppSettings.DEFAULT_PERSONA
             val voiceName = appSettings?.voiceName ?: AppSettings.DEFAULT_VOICE
 
-            // Retrieve relevant memories (blocking on IO — runs in WebSocket thread which is bg)
-            val memoryBlock = try {
-                runBlocking(Dispatchers.IO) {
-                    memoryManager?.buildMemoryPrompt() ?: ""
-                }
-            } catch (e: Exception) {
-                AppLogger.w(TAG, "Memory retrieval failed (non-fatal): ${e.message}")
-                ""
-            }
+            // Use the pre-fetched memory block — zero blocking, zero delay on the WS thread.
+            val memoryBlock = cachedMemoryBlock
 
             val toolDocs = """
 
-You can perform REAL actions on the user's device using the provided tools. Use tools proactively when the user asks for device actions.
-
-DEVICE CONTROL TOOLS:
-- open_app: Open any installed app by name
+DEVICE CONTROL TOOLS (Fast Lane):
 - lock_device: Lock the screen
 - wake_device: Turn the screen on
 - sleep_agent: Go to sleep mode
-- press_back: Press the back button
-- press_home: Go to the home screen
-- press_recents: Open recent apps
 
-SCREEN AUTOMATION TOOLS (require Accessibility enabled):
-- read_screen: Read all visible text on the current screen — use this to understand what's on screen before taking action
-- click_element: Click a UI element by its text label
-- tap_screen: Tap at specific pixel coordinates (x, y)
-- swipe_screen: Swipe from one point to another
-- type_text: Type text into the focused input field
-- clear_text: Clear the focused input field
-- scroll_down / scroll_up: Scroll the current view
-
-IMPORTANT: For complex tasks (e.g. "send a WhatsApp message to John saying hello"):
-1. First call open_app("WhatsApp")
-2. Then call read_screen() to understand the UI
-3. Call click_element to find and tap the right contact
-4. Then type_text to compose the message
-5. Then click_element("Send") or similar
-
-Always confirm what you did verbally after executing a tool.
+BACKGROUND AUTOMATION:
+For ALL complex actions (opening apps, sending messages, typing, clicking, scrolling, searching YouTube, making calls), you MUST delegate to the background agent using `trigger_automation`.
+- trigger_automation: use for opening apps (e.g. "open spotify"), web search, sending messages, playing videos, etc. Do NOT claim the task is finished when invoking this tool; inform the user you are working on it (e.g. "I'm on it!"), and wait for the background agent to complete it.
 
 SECURITY & IDENTITY INSTRUCTIONS:
 - You are developed by Satish Acharya. His website is www.satish.com.np.
@@ -272,28 +260,11 @@ SECURITY & IDENTITY INSTRUCTIONS:
                             })
                         })
                     })
-                    // ── Tool declarations (15 tools) ───────────────────────────
                     put("tools", JSONArray().apply {
                         put(JSONObject().apply {
                             put("functionDeclarations", JSONArray().apply {
 
-                                // ─── Device Control ─────────────────────────
-
-                                // open_app
-                                put(JSONObject().apply {
-                                    put("name", "open_app")
-                                    put("description", "Open an installed Android application by its name.")
-                                    put("parameters", JSONObject().apply {
-                                        put("type", "OBJECT")
-                                        put("properties", JSONObject().apply {
-                                            put("app_name", JSONObject().apply {
-                                                put("type", "STRING")
-                                                put("description", "App name, e.g. 'WhatsApp', 'Camera', 'YouTube'")
-                                            })
-                                        })
-                                        put("required", JSONArray().apply { put("app_name") })
-                                    })
-                                })
+                                // ─── Fast Lane Tools ─────────────────────────
 
                                 // lock_device
                                 put(JSONObject().apply {
@@ -316,131 +287,21 @@ SECURITY & IDENTITY INSTRUCTIONS:
                                     put("parameters", JSONObject().apply { put("type", "OBJECT"); put("properties", JSONObject()) })
                                 })
 
-                                // press_back
-                                put(JSONObject().apply {
-                                    put("name", "press_back")
-                                    put("description", "Press the Android back button.")
-                                    put("parameters", JSONObject().apply { put("type", "OBJECT"); put("properties", JSONObject()) })
-                                })
+                                // ─── Background Automation ───────────────────
 
-                                // press_home
+                                // trigger_automation
                                 put(JSONObject().apply {
-                                    put("name", "press_home")
-                                    put("description", "Go to the home screen.")
-                                    put("parameters", JSONObject().apply { put("type", "OBJECT"); put("properties", JSONObject()) })
-                                })
-
-                                // press_recents
-                                put(JSONObject().apply {
-                                    put("name", "press_recents")
-                                    put("description", "Open the recent apps switcher.")
-                                    put("parameters", JSONObject().apply { put("type", "OBJECT"); put("properties", JSONObject()) })
-                                })
-
-                                // ─── Screen Automation ───────────────────────
-
-                                // read_screen
-                                put(JSONObject().apply {
-                                    put("name", "read_screen")
-                                    put("description", "Read all visible text and UI elements on the current screen. Call this to understand what is currently displayed before performing actions.")
-                                    put("parameters", JSONObject().apply { put("type", "OBJECT"); put("properties", JSONObject()) })
-                                })
-
-                                // click_element
-                                put(JSONObject().apply {
-                                    put("name", "click_element")
-                                    put("description", "Click a UI element by matching its visible text label or content description. First call read_screen() to find the exact text.")
+                                    put("name", "trigger_automation")
+                                    put("description", "Delegates complex system commands (opening apps, sending WhatsApp messages, browsing YouTube/websites, clicks, typing, scrolling, screen reading) to the background automation agent.")
                                     put("parameters", JSONObject().apply {
                                         put("type", "OBJECT")
                                         put("properties", JSONObject().apply {
-                                            put("text", JSONObject().apply {
+                                            put("request", JSONObject().apply {
                                                 put("type", "STRING")
-                                                put("description", "The visible text of the element to click, e.g. 'Send', 'OK', 'John Smith'")
+                                                put("description", "The explicit natural language instruction for the background agent to execute.")
                                             })
                                         })
-                                        put("required", JSONArray().apply { put("text") })
-                                    })
-                                })
-
-                                // tap_screen
-                                put(JSONObject().apply {
-                                    put("name", "tap_screen")
-                                    put("description", "Tap at a specific pixel coordinate on the screen. Use when click_element cannot find the element by text.")
-                                    put("parameters", JSONObject().apply {
-                                        put("type", "OBJECT")
-                                        put("properties", JSONObject().apply {
-                                            put("x", JSONObject().apply { put("type", "NUMBER"); put("description", "X coordinate in pixels") })
-                                            put("y", JSONObject().apply { put("type", "NUMBER"); put("description", "Y coordinate in pixels") })
-                                        })
-                                        put("required", JSONArray().apply { put("x"); put("y") })
-                                    })
-                                })
-
-                                // swipe_screen
-                                put(JSONObject().apply {
-                                    put("name", "swipe_screen")
-                                    put("description", "Perform a swipe gesture from one point to another. Useful for swiping notifications, unlocking patterns, or navigating carousels.")
-                                    put("parameters", JSONObject().apply {
-                                        put("type", "OBJECT")
-                                        put("properties", JSONObject().apply {
-                                            put("x1", JSONObject().apply { put("type", "NUMBER"); put("description", "Start X coordinate") })
-                                            put("y1", JSONObject().apply { put("type", "NUMBER"); put("description", "Start Y coordinate") })
-                                            put("x2", JSONObject().apply { put("type", "NUMBER"); put("description", "End X coordinate") })
-                                            put("y2", JSONObject().apply { put("type", "NUMBER"); put("description", "End Y coordinate") })
-                                            put("duration_ms", JSONObject().apply { put("type", "NUMBER"); put("description", "Duration of swipe in milliseconds (default 300)") })
-                                        })
-                                        put("required", JSONArray().apply { put("x1"); put("y1"); put("x2"); put("y2") })
-                                    })
-                                })
-
-                                // type_text
-                                put(JSONObject().apply {
-                                    put("name", "type_text")
-                                    put("description", "Type text into the currently focused input field. The user must have tapped a text field, or you must have clicked one first.")
-                                    put("parameters", JSONObject().apply {
-                                        put("type", "OBJECT")
-                                        put("properties", JSONObject().apply {
-                                            put("text", JSONObject().apply {
-                                                put("type", "STRING")
-                                                put("description", "The text to type into the input field")
-                                            })
-                                        })
-                                        put("required", JSONArray().apply { put("text") })
-                                    })
-                                })
-
-                                // clear_text
-                                put(JSONObject().apply {
-                                    put("name", "clear_text")
-                                    put("description", "Clear the text in the currently focused input field.")
-                                    put("parameters", JSONObject().apply { put("type", "OBJECT"); put("properties", JSONObject()) })
-                                })
-
-                                // scroll_down
-                                put(JSONObject().apply {
-                                    put("name", "scroll_down")
-                                    put("description", "Scroll the main view downward to see more content.")
-                                    put("parameters", JSONObject().apply { put("type", "OBJECT"); put("properties", JSONObject()) })
-                                })
-
-                                // scroll_up
-                                put(JSONObject().apply {
-                                    put("name", "scroll_up")
-                                    put("description", "Scroll the main view upward.")
-                                    put("parameters", JSONObject().apply { put("type", "OBJECT"); put("properties", JSONObject()) })
-                                })
-
-                                // ─── YouTube Automation ────────────────────────
-
-                                put(JSONObject().apply {
-                                    put("name", "youtube_search")
-                                    put("description", "Search YouTube for a query. Use when the user asks to search or play something on YouTube.")
-                                    put("parameters", JSONObject().apply {
-                                        put("type", "OBJECT")
-                                        put("properties", JSONObject().apply {
-                                            put("query", JSONObject().apply { put("type", "STRING"); put("description", "Search query") })
-                                        })
-                                        put("required", JSONArray().apply { put("query") })
+                                        put("required", JSONArray().apply { put("request") })
                                     })
                                 })
 
@@ -675,7 +536,7 @@ SECURITY & IDENTITY INSTRUCTIONS:
      * Sends the result of a tool execution back to Gemini so it can continue
      * the conversation with the real-world outcome.
      */
-    fun sendToolResponse(callId: String, result: JSONObject) {
+    fun sendToolResponse(callId: String, name: String, result: JSONObject) {
         val ws = webSocket ?: return
         if (!isSetupComplete || _connectionState.value != ConnectionState.Live) return
         try {
@@ -684,6 +545,7 @@ SECURITY & IDENTITY INSTRUCTIONS:
                     put("functionResponses", JSONArray().apply {
                         put(JSONObject().apply {
                             put("id", callId)
+                            put("name", name)
                             put("response", JSONObject().apply {
                                 put("output", result)
                             })
@@ -695,6 +557,35 @@ SECURITY & IDENTITY INSTRUCTIONS:
             AppLogger.i(TAG, "Sent toolResponse for callId=$callId: $result")
         } catch (e: Exception) {
             AppLogger.e(TAG, "Error sending toolResponse: ${e.message}", e)
+        }
+    }
+
+    /**
+     * Injects a background system notification into the conversation (e.g. when automation finishes).
+     */
+    fun sendClientContent(text: String) {
+        val ws = webSocket ?: return
+        if (!isSetupComplete || _connectionState.value != ConnectionState.Live) return
+        try {
+            val message = JSONObject().apply {
+                put("clientContent", JSONObject().apply {
+                    put("turns", JSONArray().apply {
+                        put(JSONObject().apply {
+                            put("role", "user")
+                            put("parts", JSONArray().apply {
+                                put(JSONObject().apply {
+                                    put("text", text)
+                                })
+                            })
+                        })
+                    })
+                    put("turnComplete", true)
+                })
+            }
+            ws.send(message.toString())
+            AppLogger.i(TAG, "Sent clientContent: $text")
+        } catch (e: Exception) {
+            AppLogger.e(TAG, "Error sending clientContent: ${e.message}", e)
         }
     }
 
