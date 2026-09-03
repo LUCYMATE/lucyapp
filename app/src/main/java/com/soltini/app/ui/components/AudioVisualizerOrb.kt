@@ -12,6 +12,7 @@ import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.size
+import androidx.compose.material3.MaterialTheme
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.Alignment
@@ -21,12 +22,9 @@ import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.unit.dp
-import com.soltini.app.ui.theme.AccentBlue
-import com.soltini.app.ui.theme.AccentIndigo
-import com.soltini.app.ui.theme.AccentPink
-import com.soltini.app.ui.theme.AccentPurple
-import com.soltini.app.ui.theme.AccentTeal
-import com.soltini.app.ui.theme.DarkSurfaceVariant
+import com.soltini.app.ui.theme.RosePink
+import com.soltini.app.ui.theme.SoftBlush
+import com.soltini.app.ui.theme.SoftViolet
 
 @Composable
 fun AudioVisualizerOrb(
@@ -39,10 +37,10 @@ fun AudioVisualizerOrb(
 ) {
     val infiniteTransition = rememberInfiniteTransition(label = "pulse")
     val pulseScaleAnim by infiniteTransition.animateFloat(
-        initialValue = 0.95f,
-        targetValue = 1.05f,
+        initialValue = 0.96f,
+        targetValue = 1.06f,
         animationSpec = infiniteRepeatable(
-            animation = tween(1400, easing = FastOutSlowInEasing),
+            animation = tween(1200, easing = FastOutSlowInEasing),
             repeatMode = RepeatMode.Reverse
         ),
         label = "pulseScale"
@@ -56,25 +54,26 @@ fun AudioVisualizerOrb(
     )
 
     val baseScale = if (isLive) pulseScaleAnim else 1f
-    val dynamicRadiusScale = baseScale * (1f + animatedAmp * 1.5f) // Siri-like big bounce
+    val dynamicRadiusScale = baseScale * (1f + animatedAmp * 1.6f) // Siri/Gemini dynamic bounce
 
-    // Determine target colors based on state
+    // Target colors for Pinky-White theme
     val targetCenter = when {
-        !isLive -> DarkSurfaceVariant
-        isMuted -> Color.DarkGray
-        isSpeaking -> AccentPink
-        else -> AccentTeal
+        !isLive -> Color(0xFFFCE7F3)
+        isMuted -> Color(0xFFE2E8F0)
+        isSpeaking -> RosePink
+        else -> SoftBlush
     }
 
     val targetEdge = when {
-        !isLive -> Color.DarkGray
-        isMuted -> DarkSurfaceVariant
-        isSpeaking -> AccentPurple
-        else -> AccentBlue
+        !isLive -> Color(0xFFF472B6).copy(alpha = 0.5f)
+        isMuted -> Color(0xFF94A3B8)
+        isSpeaking -> SoftViolet
+        else -> RosePink
     }
 
     val colorCenter by animateColorAsState(targetCenter, tween(500), label = "centerColor")
     val colorEdge by animateColorAsState(targetEdge, tween(500), label = "edgeColor")
+
 
     Box(
         modifier = modifier

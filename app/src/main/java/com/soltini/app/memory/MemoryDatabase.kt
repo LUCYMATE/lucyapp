@@ -84,6 +84,12 @@ class MemoryDatabase(context: Context) : SQLiteOpenHelper(
         Log.i(TAG, "All memories cleared")
     }
 
+    fun deleteMemory(id: Long): Boolean {
+        val deleted = writableDatabase.delete(TABLE, "$COL_ID = ?", arrayOf(id.toString())) > 0
+        Log.i(TAG, "Deleted memory id=$id (success=$deleted)")
+        return deleted
+    }
+
     // ── Read ──────────────────────────────────────────────────────────────────
 
     data class Memory(

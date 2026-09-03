@@ -1,4 +1,28 @@
 <?xml version="1.0" encoding="utf-8"?>
-<resources>
-    <style name="Theme.Soltini" parent="android:Theme.DeviceDefault.NoActionBar" />
+<resources xmlns:tools="http://schemas.android.com/tools">
+    <!-- Base theme: Pinky-White Edge-to-Edge -->
+    <style name="Theme.Soltini" parent="android:Theme.DeviceDefault.NoActionBar">
+        <item name="android:windowBackground">@color/pinky_white</item>
+        <item name="android:colorBackground">@color/pinky_white</item>
+        <!-- Avoid translucent bars that trigger cold-start grey flashes -->
+        <item name="android:windowTranslucentStatus">false</item>
+        <item name="android:windowTranslucentNavigation">false</item>
+        <item name="android:windowDrawsSystemBarBackgrounds">true</item>
+        <item name="android:statusBarColor">@android:color/transparent</item>
+        <item name="android:navigationBarColor">@android:color/transparent</item>
+        <!-- Dark icons on light pinky-white background -->
+        <item name="android:windowLightStatusBar">true</item>
+        <item name="android:windowLightNavigationBar">true</item>
+        <!-- No title bar -->
+        <item name="android:windowNoTitle">true</item>
+        <!-- Cutout display handling -->
+        <item name="android:windowLayoutInDisplayCutoutMode">shortEdges</item>
+        <!-- Android 12+ Splash Screen attributes to eliminate black/dark splash flashes -->
+        <item name="android:windowSplashScreenBackground">@color/pinky_white</item>
+        <item name="android:windowSplashScreenAnimatedIcon">@drawable/ic_launcher_foreground</item>
+        <item name="android:windowSplashScreenIconBackgroundColor">@color/pinky_white</item>
+        <!-- Eliminate contrast scrims on Android Q+ -->
+        <item name="android:enforceStatusBarContrast" tools:targetApi="q">false</item>
+        <item name="android:enforceNavigationBarContrast" tools:targetApi="q">false</item>
+    </style>
 </resources>

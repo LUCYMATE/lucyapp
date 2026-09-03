@@ -180,6 +180,7 @@ Return only valid JSON array, no explanation."""
     fun getCount(): Int = db.getCount()
     fun getAllMemories(): List<MemoryDatabase.Memory> = db.getAllMemories()
     fun clearAll() = db.clearAll()
+    fun deleteMemory(id: Long): Boolean = db.deleteMemory(id)
 
     // ── Embedding ─────────────────────────────────────────────────────────────
 

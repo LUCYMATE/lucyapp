@@ -254,6 +254,82 @@ class SoltiniAccessibilityService : AccessibilityService() {
         return result.ifEmpty { "Screen appears empty or content is not accessible." }
     }
 
+    /**
+     * Maya-style ultra-compact node hierarchy serialization (text|desc|x,y;)
+     * Capped at maxNodes (default 400) to save token overhead.
+     */
+    fun dumpCompactScreenState(maxNodes: Int = 400): String {
+        val sb = StringBuilder()
+        var nodeCount = 0
+        try {
+            val windows: List<AccessibilityWindowInfo> = windows ?: emptyList()
+            for (window in windows) {
+                val root = window.root ?: continue
+                nodeCount = collectCompactNodeText(root, sb, nodeCount, maxNodes)
+                root.recycle()
+                if (nodeCount >= maxNodes) break
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "dumpCompactScreenState failed: ${e.message}")
+            return ""
+        }
+        return sb.toString()
+    }
+
+    private fun collectCompactNodeText(
+        node: AccessibilityNodeInfo,
+        sb: StringBuilder,
+        currentCount: Int,
+        maxNodes: Int
+    ): Int {
+        var count = currentCount
+        if (count >= maxNodes) return count
+
+        val text = node.text?.toString()?.trim() ?: ""
+        val desc = node.contentDescription?.toString()?.trim() ?: ""
+
+        if (text.isNotEmpty() || desc.isNotEmpty()) {
+            val rect = Rect()
+            node.getBoundsInScreen(rect)
+            sb.append(text)
+                .append('|')
+                .append(desc)
+                .append('|')
+                .append(rect.centerX())
+                .append(',')
+                .append(rect.centerY())
+                .append(';')
+            count++
+        }
+
+        for (i in 0 until node.childCount) {
+            if (count >= maxNodes) break
+            val child = node.getChild(i) ?: continue
+            count = collectCompactNodeText(child, sb, count, maxNodes)
+            child.recycle()
+        }
+        return count
+    }
+
+    /**
+     * Wait for specified text to appear or disappear on screen.
+     */
+    suspend fun waitForScreenText(text: String, mode: String = "appear", timeoutSeconds: Int = 60): Boolean {
+        val q = text.lowercase().trim()
+        val isAppear = mode.equals("appear", ignoreCase = true)
+        val startTime = System.currentTimeMillis()
+        val timeoutMs = timeoutSeconds * 1000L
+
+        while (System.currentTimeMillis() - startTime < timeoutMs) {
+            val screen = readScreen().lowercase()
+            val contains = screen.contains(q)
+            if (isAppear && contains) return true
+            if (!isAppear && !contains) return true
+            kotlinx.coroutines.delay(500)
+        }
+        return false
+    }
+
     private fun collectNodeText(node: AccessibilityNodeInfo, sb: StringBuilder, depth: Int) {
         val indent = "  ".repeat(depth.coerceAtMost(8))
 
@@ -437,14 +513,42 @@ class SoltiniAccessibilityService : AccessibilityService() {
 
     // ─── Node Search Helpers ──────────────────────────────────────────────────
 
+    private fun levenshteinRatio(s1: String, s2: String): Double {
+        if (s1.isEmpty() && s2.isEmpty()) return 1.0
+        if (s1.isEmpty() || s2.isEmpty()) return 0.0
+
+        val dp = Array(s1.length + 1) { IntArray(s2.length + 1) }
+
+        for (i in 0..s1.length) dp[i][0] = i
+        for (j in 0..s2.length) dp[0][j] = j
+
+        for (i in 1..s1.length) {
+            for (j in 1..s2.length) {
+                val cost = if (s1[i - 1] == s2[j - 1]) 0 else 1
+                dp[i][j] = kotlin.math.min(
+                    dp[i - 1][j] + 1,
+                    kotlin.math.min(dp[i][j - 1] + 1, dp[i - 1][j - 1] + cost)
+                )
+            }
+        }
+        val distance = dp[s1.length][s2.length]
+        val maxLength = kotlin.math.max(s1.length, s2.length)
+        return 1.0 - (distance.toDouble() / maxLength)
+    }
+
     private fun findNodeByQuery(
         node: AccessibilityNodeInfo,
         query: String,
         requireClickable: Boolean
     ): AccessibilityNodeInfo? {
-        val text = node.text?.toString()?.lowercase() ?: ""
-        val desc = node.contentDescription?.toString()?.lowercase() ?: ""
-        val matches = (text.contains(query) || desc.contains(query))
+        val text = node.text?.toString()?.lowercase()?.trim() ?: ""
+        val desc = node.contentDescription?.toString()?.lowercase()?.trim() ?: ""
+        
+        val contains = text.contains(query) || desc.contains(query)
+        val fuzzyText = if (text.isNotEmpty()) levenshteinRatio(text, query) else 0.0
+        val fuzzyDesc = if (desc.isNotEmpty()) levenshteinRatio(desc, query) else 0.0
+        
+        val matches = contains || fuzzyText > 0.85 || fuzzyDesc > 0.85
         val clickOk = !requireClickable || node.isClickable
 
         if (matches && clickOk) {

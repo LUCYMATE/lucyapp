@@ -90,6 +90,7 @@ class BackgroundVoiceService : Service(), GeminiLiveListener, ToolCallListener {
     private lateinit var geminiLiveManager: GeminiLiveManager
     private lateinit var agentToolExecutor: AgentToolExecutor
     private lateinit var backgroundAgentRunner: com.soltini.app.agent.BackgroundAgentRunner
+    private lateinit var wakeWordEngine: com.soltini.app.audio.WakeWordEngine
 
     private val _hasMicPermission = MutableStateFlow(false)
     val hasMicPermission: StateFlow<Boolean> = _hasMicPermission.asStateFlow()
@@ -180,9 +181,47 @@ class BackgroundVoiceService : Service(), GeminiLiveListener, ToolCallListener {
         appSettings = AppSettings(this)
         memoryManager = MemoryManager(MemoryDatabase(this), appSettings)
 
+        wakeWordEngine = com.soltini.app.audio.WakeWordEngine(this).apply {
+            initialize()
+            onWakeWordDetected = { word ->
+                Log.i(TAG, "Wake word detected: $word — activating assistant")
+                if (_isSleeping.value) {
+                    wakeUp()
+                }
+                if (connectionState.value == ConnectionState.Disconnected) {
+                    connect()
+                }
+                OverlayService.getInstance()?.setRingState(com.soltini.app.overlay.RingState.LISTENING)
+            }
+            if (appSettings.isWakeWordEnabled) {
+                start()
+            }
+        }
+
+        com.soltini.app.core.PhoneStateReceiver.onCallStateChangedListener = { state, number ->
+            when (state) {
+                android.telephony.TelephonyManager.EXTRA_STATE_RINGING,
+                android.telephony.TelephonyManager.EXTRA_STATE_OFFHOOK -> {
+                    Log.i(TAG, "Phone call in progress ($state, number: $number) — muting Soltini audio")
+                    audioPlayer.stop()
+                    setMute(true)
+                }
+                android.telephony.TelephonyManager.EXTRA_STATE_IDLE -> {
+                    Log.i(TAG, "Phone call finished — unmuting Soltini audio")
+                    setMute(false)
+                    if (connectionState.value == ConnectionState.Live) {
+                        audioPlayer.start()
+                    }
+                }
+            }
+        }
+
         audioRecorder = AudioRecorder(
             onAudioChunkCaptured = { pcmChunk ->
-                if (!_isSleeping.value) {
+                if (appSettings.isWakeWordEnabled) {
+                    wakeWordEngine.processAudioFrame(pcmChunk, pcmChunk.size)
+                }
+                if (!_isSleeping.value && !_isMuted.value) {
                     geminiLiveManager.sendAudioChunk(pcmChunk)
                 }
             },
@@ -287,10 +326,34 @@ class BackgroundVoiceService : Service(), GeminiLiveListener, ToolCallListener {
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        // Only handle explicit sleep wakeup here.
-        if (_isSleeping.value) {
+        if (intent?.action == "com.soltini.app.ACTION_SPEAK_REMINDER") {
+            val msg = intent.getStringExtra("message") ?: ""
+            if (msg.isNotEmpty()) {
+                if (_isSleeping.value) wakeUp()
+                if (connectionState.value == ConnectionState.Disconnected) connect()
+                
+                serviceScope.launch {
+                    // Wait up to 5 seconds for connection
+                    var retries = 25
+                    while (connectionState.value != ConnectionState.Live && retries > 0) {
+                        kotlinx.coroutines.delay(200)
+                        retries--
+                    }
+                    if (connectionState.value == ConnectionState.Live) {
+                        val notificationSummary = com.soltini.app.automation.SoltiniNotificationListener.getRecentNotificationsSummary()
+                        val fullMsg = if (notificationSummary.isNotEmpty()) {
+                            "REMINDER TRIGGERED: $msg\nAlso, you have recent notifications: $notificationSummary. Please speak aloud to summarize the reminder and notifications to the user."
+                        } else {
+                            "REMINDER TRIGGERED: $msg. Please speak aloud to notify the user."
+                        }
+                        geminiLiveManager.sendClientContent(fullMsg)
+                    }
+                }
+            }
+        } else if (_isSleeping.value) {
             wakeUp()
         }
+        
         // START_NOT_STICKY: We explicitly do NOT want the OS to natively resurrect this service.
         // Instead, we manually handle the "continuous agent" resurrection via AlarmManager in
         // onTaskRemoved, which allows us to respect Pause Mode (i.e. we don't schedule the alarm
@@ -434,13 +497,42 @@ class BackgroundVoiceService : Service(), GeminiLiveListener, ToolCallListener {
 
     fun toggleMute() {
         val newMute = !_isMuted.value
-        _isMuted.value = newMute
-        audioRecorder.isMuted = newMute
+        setMute(newMute)
+    }
+
+    fun setMute(muted: Boolean) {
+        _isMuted.value = muted
+        audioRecorder.isMuted = muted
     }
 
     fun clearTranscript() {
         _transcripts.value = emptyList()
         currentGeminiTranscript.clear()
+    }
+
+    /**
+     * Injects a text message into the live Gemini session as if the user spoke it.
+     * Used by quick macro buttons to send preset prompts without voice input.
+     */
+    fun sendTextMessage(text: String) {
+        if (connectionState.value != ConnectionState.Live) {
+            // Auto-connect first, then send after a brief delay
+            connect()
+            serviceScope.launch {
+                kotlinx.coroutines.delay(2500)
+                if (connectionState.value == ConnectionState.Live) {
+                    geminiLiveManager.sendClientContent(text)
+                    addTranscript(TranscriptEntry(sender = TranscriptEntry.Sender.USER, text = text))
+                }
+            }
+        } else {
+            geminiLiveManager.sendClientContent(text)
+            addTranscript(TranscriptEntry(sender = TranscriptEntry.Sender.USER, text = text))
+        }
+    }
+
+    private fun addTranscript(entry: TranscriptEntry) {
+        _transcripts.value = (_transcripts.value + entry).takeLast(100)
     }
 
     // ── Lite Pause (default) ─────────────────────────────────────────────────
@@ -743,6 +835,9 @@ class BackgroundVoiceService : Service(), GeminiLiveListener, ToolCallListener {
         val finishedText = currentGeminiTranscript.toString().trim()
         currentGeminiTranscript.clear()
         if (finishedText.isNotBlank()) {
+            // Show AI response as floating bubble on the overlay orb (Maya-style)
+            OverlayService.getInstance()?.showResponseBubble(finishedText)
+
             serviceScope.launch(Dispatchers.IO) {
                 try {
                     memoryManager.extractAndSave(finishedText)

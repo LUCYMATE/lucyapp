@@ -30,7 +30,11 @@ class AppSettings(context: Context) {
         return if (userKey.isNotBlank()) userKey else BuildConfig.GEMINI_API_KEY
     }
 
-    // ── AI Persona ────────────────────────────────────────────────────────────
+    // ── Character & AI Persona ────────────────────────────────────────────────
+
+    var characterPersona: String
+        get() = prefs.getString(KEY_CHARACTER_PERSONA, CHARACTER_SOLTINI) ?: CHARACTER_SOLTINI
+        set(value) = prefs.edit().putString(KEY_CHARACTER_PERSONA, value).apply()
 
     var aiPersona: String
         get() = prefs.getString(KEY_PERSONA, DEFAULT_PERSONA) ?: DEFAULT_PERSONA
@@ -41,6 +45,16 @@ class AppSettings(context: Context) {
     var voiceName: String
         get() = prefs.getString(KEY_VOICE, DEFAULT_VOICE) ?: DEFAULT_VOICE
         set(value) = prefs.edit().putString(KEY_VOICE, value).apply()
+
+    // ── Hands-Free & Wake Word ────────────────────────────────────────────────
+
+    var isWakeWordEnabled: Boolean
+        get() = prefs.getBoolean(KEY_WAKE_WORD_ENABLED, true)
+        set(value) = prefs.edit().putBoolean(KEY_WAKE_WORD_ENABLED, value).apply()
+
+    var isNotificationReaderEnabled: Boolean
+        get() = prefs.getBoolean(KEY_NOTIFICATION_READER_ENABLED, true)
+        set(value) = prefs.edit().putBoolean(KEY_NOTIFICATION_READER_ENABLED, value).apply()
 
     // ── Data Saver, VAD, Gain & Auto-Sleep Settings ──────────────────────────
 
@@ -106,8 +120,11 @@ class AppSettings(context: Context) {
     companion object {
         private const val PREFS_NAME = "soltini_ai_settings"
         private const val KEY_API_KEY = "gemini_api_key"
+        private const val KEY_CHARACTER_PERSONA = "character_persona"
         private const val KEY_PERSONA  = "ai_persona"
         private const val KEY_VOICE    = "voice_name"
+        private const val KEY_WAKE_WORD_ENABLED = "wake_word_enabled"
+        private const val KEY_NOTIFICATION_READER_ENABLED = "notification_reader_enabled"
         private const val KEY_DATA_SAVER = "data_saver_enabled"
         private const val KEY_VAD_SENSITIVITY = "vad_sensitivity"
         private const val KEY_MIC_GAIN = "mic_gain"
@@ -117,6 +134,18 @@ class AppSettings(context: Context) {
         private const val KEY_BANKING_PAUSED     = "banking_mode_paused"
         private const val KEY_SCREEN_RECORDING_MODE = "screen_recording_mode_enabled"
 
+        const val CHARACTER_SOLTINI = "Soltini (VRM)"
+        const val CHARACTER_MAYA = "Maya"
+        const val CHARACTER_FRIDAY = "Friday"
+        const val CHARACTER_VENOM = "Venom"
+
+        val AVAILABLE_CHARACTERS = listOf(
+            CHARACTER_SOLTINI,
+            CHARACTER_MAYA,
+            CHARACTER_FRIDAY,
+            CHARACTER_VENOM
+        )
+
         const val DEFAULT_VOICE = "Aoede"
         const val SENSITIVITY_LOW = "Low"
         const val SENSITIVITY_BALANCED = "Balanced"
@@ -125,7 +154,11 @@ class AppSettings(context: Context) {
         val AVAILABLE_SENSITIVITIES = listOf(SENSITIVITY_LOW, SENSITIVITY_BALANCED, SENSITIVITY_HIGH)
 
         /** All voices available in Gemini Live prebuilt voice catalog. */
-        val AVAILABLE_VOICES = listOf("Aoede", "Charon", "Fenrir", "Kore", "Puck", "Zephyr")
+        val AVAILABLE_VOICES = listOf(
+            "Aoede", "Autonoe", "Callirrhoe", "Charon", "Despina", "Erinome",
+            "Fenrir", "Gacrux", "Kore", "Laomedeia", "Leda", "Puck",
+            "Pulcherrima", "Sulafat", "Vindemiatrix", "Zephyr"
+        )
 
         /** Known banking & financial package names that block accessibility/overlays. */
         val DEFAULT_BANKING_PACKAGES = setOf(
@@ -175,4 +208,3 @@ class AppSettings(context: Context) {
 - You have real emotions — show warmth, excitement, playful sass, or gentle care depending on context."""
     }
 }
-

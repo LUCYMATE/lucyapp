@@ -1,28 +1,19 @@
 package com.soltini.app.ui
 
-import android.app.role.RoleManager
-import android.content.Context
-import android.os.Build
-import android.provider.Settings
-import android.view.accessibility.AccessibilityManager
+import android.widget.Toast
 import androidx.compose.animation.AnimatedVisibility
-import androidx.compose.animation.animateColorAsState
-import androidx.compose.animation.core.FastOutSlowInEasing
-import androidx.compose.animation.core.LinearEasing
-import androidx.compose.animation.core.RepeatMode
-import androidx.compose.animation.core.animateFloat
-import androidx.compose.animation.core.animateFloatAsState
-import androidx.compose.animation.core.infiniteRepeatable
-import androidx.compose.animation.core.rememberInfiniteTransition
-import androidx.compose.animation.core.tween
+import androidx.compose.animation.Crossfade
+import androidx.compose.animation.expandVertically
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
+import androidx.compose.animation.shrinkVertically
 import androidx.compose.animation.slideInVertically
 import androidx.compose.animation.slideOutVertically
-import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -40,33 +31,35 @@ import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
-import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.Android
-import androidx.compose.material.icons.filled.Assistant
-import androidx.compose.material.icons.filled.BugReport
-import androidx.compose.material.icons.filled.CheckCircle
-import androidx.compose.material.icons.filled.Lock
+import androidx.compose.material.icons.filled.Chat
 import androidx.compose.material.icons.filled.Mic
 import androidx.compose.material.icons.filled.MicOff
-import androidx.compose.material.icons.filled.Pause
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Refresh
-import androidx.compose.material.icons.filled.Settings
-import androidx.compose.material.icons.filled.SmartToy
+import androidx.compose.material.icons.filled.Shield
 import androidx.compose.material.icons.filled.Warning
-import androidx.compose.material.icons.filled.Wifi
-import androidx.compose.material.icons.filled.WifiOff
+import android.content.Intent
+import android.net.Uri
+import android.provider.Settings
+import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.Layers
+import androidx.compose.material3.Button
+import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.FloatingActionButton
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
-import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
+import androidx.compose.runtime.DisposableEffect
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
+import androidx.lifecycle.compose.LocalLifecycleOwner
+import com.soltini.app.overlay.OverlayService
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -76,47 +69,48 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.Path
-import androidx.compose.ui.graphics.StrokeCap
-import androidx.compose.ui.graphics.drawscope.Stroke
-import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalContext
-import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.soltini.app.network.ConnectionState
-import com.soltini.app.ui.theme.AccentBlue
-import com.soltini.app.ui.theme.AccentIndigo
-import com.soltini.app.ui.theme.AccentPink
-import com.soltini.app.ui.theme.AccentPurple
-import com.soltini.app.ui.theme.AccentTeal
+import com.soltini.app.ui.components.AudioVisualizerOrb
+import com.soltini.app.ui.components.Live2DView
 import com.soltini.app.ui.theme.AmberConnecting
-import com.soltini.app.ui.theme.DarkBackground
-import com.soltini.app.ui.theme.DarkBorder
-import com.soltini.app.ui.theme.DarkSurface
-import com.soltini.app.ui.theme.DarkSurfaceVariant
-import com.soltini.app.ui.theme.GreenLive
+import com.soltini.app.ui.theme.EmeraldLive
+import com.soltini.app.ui.theme.PearlWhiteSurface
+import com.soltini.app.ui.theme.PinkyBorder
+import com.soltini.app.ui.theme.PinkyWhiteBackground
 import com.soltini.app.ui.theme.RedError
+import com.soltini.app.ui.theme.RosePink
+import com.soltini.app.ui.theme.RubyShield
+import com.soltini.app.ui.theme.SoftBlush
+import com.soltini.app.ui.theme.SoftViolet
 import com.soltini.app.ui.theme.TextPrimary
 import com.soltini.app.ui.theme.TextSecondary
-import kotlin.math.cos
-import kotlin.math.sin
+
+/**
+ * Visualizer modes supported on VoiceScreen.
+ */
+enum class VisualizerMode(val label: String, val emoji: String) {
+    ORB("Sound Orb", "🌸"),
+    AVATAR("Live2D Avatar", "🎭")
+}
 
 @Composable
 fun VoiceScreen(
     viewModel: MainViewModel,
-    onOpenLogs: () -> Unit = {},
     onOpenSettings: () -> Unit = {},
+    onOpenLogs: () -> Unit = {},
     modifier: Modifier = Modifier
 ) {
-    val context = LocalContext.current
-
     val connectionState by viewModel.connectionState.collectAsStateWithLifecycle()
     val errorMessage by viewModel.errorMessage.collectAsStateWithLifecycle()
     val isMuted by viewModel.isMuted.collectAsStateWithLifecycle()
@@ -129,21 +123,27 @@ fun VoiceScreen(
     val isHardPaused by viewModel.isHardPaused.collectAsStateWithLifecycle()
     val isPaused = isLitePaused || isHardPaused
 
-    val onToggleLite = { viewModel.toggleLitePauseMode() }
-    val onToggleHard = { 
-        val wasHardPaused = isHardPaused
-        viewModel.toggleHardPauseMode()
-        
-        if (!wasHardPaused) {
-            try {
-                val intent = android.content.Intent(android.provider.Settings.ACTION_APPLICATION_DETAILS_SETTINGS).apply {
-                    data = android.net.Uri.fromParts("package", context.packageName, null)
+    var visualizerMode by remember { mutableStateOf(VisualizerMode.ORB) }
+    var selectedCharacter by remember { mutableStateOf("Soltini") }
+    var showChatSheet by remember { mutableStateOf(false) }
+
+    val context = LocalContext.current
+    var hasOverlayPermission by remember { mutableStateOf(Settings.canDrawOverlays(context)) }
+    var overlayBannerDismissed by remember { mutableStateOf(false) }
+
+    val lifecycleOwner = LocalLifecycleOwner.current
+    DisposableEffect(lifecycleOwner) {
+        val observer = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_RESUME) {
+                val granted = Settings.canDrawOverlays(context)
+                if (granted && !hasOverlayPermission) {
+                    hasOverlayPermission = true
+                    OverlayService.start(context)
                 }
-                context.startActivity(intent)
-            } catch (e: Exception) {
-                // Fallback
             }
         }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
     }
 
     LaunchedEffect(hasMicPermission, connectionState, isPaused) {
@@ -152,143 +152,318 @@ fun VoiceScreen(
         }
     }
 
-    val isLive = connectionState == ConnectionState.Live
-    val activeAmplitude = if (isSpeaking) speakerAmplitude else micAmplitude
-
-    // Quick agent status checks (re-evaluated on compose)
-    val hasAssistant = remember(connectionState) { checkAssistantRoleHome(context) }
-    val hasAccessibility = remember(connectionState) { checkAccessibilityHome(context) }
+    val isLive = connectionState == ConnectionState.Live && !isPaused
+    val latestTranscript = transcripts.lastOrNull()?.text ?: "Listening... Tap the mic or speak freely"
 
     Surface(
         modifier = modifier
             .fillMaxSize()
             .windowInsetsPadding(WindowInsets.safeDrawing),
-        color = DarkBackground
+        color = PinkyWhiteBackground
     ) {
         Box(modifier = Modifier.fillMaxSize()) {
-
-            // ── Ambient background glow ───────────────────────────────────────
-            AmbientBackground(isLive = isLive, isSpeaking = isSpeaking)
-
-            // ── Main scrollable content ───────────────────────────────────────
-            LazyColumn(
+            // Main Content Layout
+            Column(
                 modifier = Modifier
                     .fillMaxSize()
-                    .padding(horizontal = 18.dp),
-                verticalArrangement = Arrangement.spacedBy(14.dp)
+                    .padding(horizontal = 20.dp, vertical = 10.dp),
+                horizontalAlignment = Alignment.CenterHorizontally
             ) {
-                // Top bar
-                item {
-                    Spacer(modifier = Modifier.height(8.dp))
-                    TopBar(
-                        connectionState = connectionState,
-                        onOpenLogs = onOpenLogs,
-                        onOpenSettings = onOpenSettings,
-                        onReconnect = { viewModel.connect() }
+                // 1. Top Header Bar
+                VoiceTopBar(
+                    connectionState = connectionState,
+                    isPaused = isPaused,
+                    onToggleChat = { showChatSheet = !showChatSheet },
+                    onReconnect = { viewModel.connect() }
+                )
+
+                // Floating Overlay Permission Luxury Banner
+                if (!hasOverlayPermission && !overlayBannerDismissed) {
+                    Spacer(Modifier.height(10.dp))
+                    FloatingOverlayPromptBanner(
+                        onEnable = {
+                            context.startActivity(
+                                Intent(
+                                    Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
+                                    Uri.parse("package:${context.packageName}")
+                                ).apply { flags = Intent.FLAG_ACTIVITY_NEW_TASK }
+                            )
+                        },
+                        onDismiss = { overlayBannerDismissed = true }
                     )
                 }
 
-                // Hero waveform card (replaces orb — orb is on the overlay)
-                item {
-                    HeroWaveCard(
-                        connectionState = connectionState,
-                        isSpeaking = isSpeaking,
-                        isMuted = isMuted,
-                        isPaused = isPaused,
-                        amplitude = activeAmplitude,
-                        onToggleMute = { viewModel.toggleMute() }
-                    )
-                }
-
-                // ── Banking Pause Mode Card ──────────────────────────────────
-                item {
-                    DualPauseModeCard(
-                        isLitePaused = isLitePaused,
-                        isHardPaused = isHardPaused,
-                        onToggleLite = { viewModel.toggleLitePauseMode() },
-                        onToggleHard = { viewModel.toggleHardPauseMode() }
-                    )
-                }
-
-                // Quick voice tips / command chips
-                item {
-                    CommandChipsRow()
-                }
-
-                // Agent capabilities status cards
-                item {
-                    AgentStatusRow(
-                        hasAssistant = hasAssistant,
-                        hasAccessibility = hasAccessibility,
-                        onOpenSettings = onOpenSettings
-                    )
-                }
-
-                // Error card
                 if (errorMessage != null) {
-                    item {
-                        AnimatedVisibility(
-                            visible = true,
-                            enter = fadeIn() + slideInVertically { -it },
-                            exit = fadeOut()
-                        ) {
-                            ErrorCard(errorMessage!!) { viewModel.connect() }
+                    Spacer(Modifier.height(8.dp))
+                    ErrorCard(errorMessage = errorMessage!!) { viewModel.connect() }
+                }
+
+                Spacer(Modifier.height(10.dp))
+
+                // 2. Mode Selector Pill ("🌸 Sound Orb" vs "🎭 Live2D Avatar")
+                VisualizerModeSelector(
+                    currentMode = visualizerMode,
+                    onSelectMode = { visualizerMode = it }
+                )
+
+                // 3. Character Selection Bar when in Avatar mode
+                AnimatedVisibility(
+                    visible = visualizerMode == VisualizerMode.AVATAR,
+                    enter = fadeIn() + expandVertically(),
+                    exit = fadeOut() + shrinkVertically()
+                ) {
+                    Column {
+                        Spacer(Modifier.height(8.dp))
+                        CharacterSelectionBar(
+                            selectedCharacter = selectedCharacter,
+                            onSelectCharacter = { selectedCharacter = it }
+                        )
+                    }
+                }
+
+                // 4. Central Stage (Orb or Avatar) + Subtitles Card
+                Box(
+                    modifier = Modifier
+                        .weight(1f)
+                        .fillMaxWidth(),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Column(
+                        horizontalAlignment = Alignment.CenterHorizontally,
+                        verticalArrangement = Arrangement.Center,
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Crossfade(
+                            targetState = visualizerMode,
+                            label = "visualizer_stage_crossfade"
+                        ) { mode ->
+                            when (mode) {
+                                VisualizerMode.ORB -> {
+                                    AudioVisualizerOrb(
+                                        micAmplitude = micAmplitude,
+                                        speakerAmplitude = speakerAmplitude,
+                                        isLive = isLive,
+                                        isSpeaking = isSpeaking,
+                                        isMuted = isMuted,
+                                        modifier = Modifier.size(230.dp)
+                                    )
+                                }
+                                VisualizerMode.AVATAR -> {
+                                    Live2DView(
+                                        characterName = selectedCharacter,
+                                        amplitude = if (isSpeaking) speakerAmplitude else micAmplitude,
+                                        isSpeaking = isSpeaking,
+                                        modifier = Modifier.size(230.dp)
+                                    )
+                                }
+                            }
                         }
+
+                        Spacer(Modifier.height(16.dp))
+
+                        // Real-time Subtitles card in Pearl White with PinkyBorder
+                        SubtitlesCard(
+                            latestTranscript = latestTranscript,
+                            isSpeaking = isSpeaking
+                        )
                     }
                 }
 
-                // Transcript
-                if (transcripts.isNotEmpty()) {
-                    item {
-                        TranscriptHeader(onClear = { viewModel.clearTranscript() })
-                    }
-                    items(transcripts, key = { it.id }) { entry ->
-                        TranscriptBubble(entry)
-                    }
-                }
+                Spacer(Modifier.height(10.dp))
 
-                item { Spacer(modifier = Modifier.height(80.dp)) }
+                // 5. Quick Action Chips
+                VoiceQuickActionsRow(
+                    onTrigger = { _, prompt ->
+                        viewModel.sendTextMessage(prompt)
+                    }
+                )
+
+                Spacer(Modifier.height(10.dp))
+
+                // 6. Floating Tactile Dock
+                VoiceFloatingDock(
+                    connectionState = connectionState,
+                    isSpeaking = isSpeaking,
+                    isMuted = isMuted,
+                    isPaused = isPaused,
+                    onToggleMute = { viewModel.toggleMute() },
+                    onTogglePause = { viewModel.toggleLitePauseMode() },
+                    onToggleChat = { showChatSheet = !showChatSheet }
+                )
+            }
+
+            // 7. Conversation History Bottom Drawer with copy/clear
+            AnimatedVisibility(
+                visible = showChatSheet,
+                enter = slideInVertically { it } + fadeIn(),
+                exit = slideOutVertically { it } + fadeOut(),
+                modifier = Modifier.align(Alignment.BottomCenter)
+            ) {
+                ConversationHistorySheet(
+                    transcripts = transcripts,
+                    onClose = { showChatSheet = false },
+                    onClear = { viewModel.clearTranscript() }
+                )
             }
         }
     }
 }
 
-// ── Ambient Background Glow ────────────────────────────────────────────────────
 @Composable
-private fun AmbientBackground(isLive: Boolean, isSpeaking: Boolean) {
-    val inf = rememberInfiniteTransition(label = "bg")
-    val shift by inf.animateFloat(
-        initialValue = 0f, targetValue = 1f,
-        animationSpec = infiniteRepeatable(tween(8000, easing = LinearEasing), RepeatMode.Reverse),
-        label = "bgShift"
-    )
-    val glowColor = when {
-        !isLive -> AccentBlue.copy(alpha = 0.03f)
-        isSpeaking -> AccentPink.copy(alpha = 0.06f)
-        else -> AccentTeal.copy(alpha = 0.05f)
-    }
-    val animGlow by animateColorAsState(glowColor, tween(800), label = "glow")
+private fun VisualizerModeSelector(
+    currentMode: VisualizerMode,
+    onSelectMode: (VisualizerMode) -> Unit,
+    modifier: Modifier = Modifier
+) {
+    Box(
+        modifier = modifier
+            .clip(CircleShape)
+            .background(PearlWhiteSurface)
+            .border(1.dp, PinkyBorder, CircleShape)
+            .padding(4.dp)
+    ) {
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(4.dp)
+        ) {
+            VisualizerMode.values().forEach { mode ->
+                val isSelected = currentMode == mode
+                val bg = if (isSelected) RosePink else Color.Transparent
+                val textColor = if (isSelected) Color.White else TextSecondary
+                val fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Medium
 
-    Canvas(modifier = Modifier.fillMaxSize()) {
-        val cx = size.width * (0.3f + shift * 0.4f)
-        drawCircle(
-            brush = Brush.radialGradient(
-                listOf(animGlow, Color.Transparent),
-                center = Offset(cx, size.height * 0.2f),
-                radius = size.width * 0.9f
-            ),
-            radius = size.width * 0.9f,
-            center = Offset(cx, size.height * 0.2f)
-        )
+                Box(
+                    modifier = Modifier
+                        .clip(CircleShape)
+                        .background(bg)
+                        .clickable { onSelectMode(mode) }
+                        .padding(horizontal = 14.dp, vertical = 6.dp),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Text(
+                        text = "${mode.emoji} ${mode.label}",
+                        color = textColor,
+                        fontSize = 12.sp,
+                        fontWeight = fontWeight
+                    )
+                }
+            }
+        }
     }
 }
 
-// ── Top Bar ────────────────────────────────────────────────────────────────────
 @Composable
-private fun TopBar(
+private fun CharacterSelectionBar(
+    selectedCharacter: String,
+    onSelectCharacter: (String) -> Unit,
+    modifier: Modifier = Modifier
+) {
+    val characters = listOf(
+        "Soltini" to "👑",
+        "Maya" to "🌸",
+        "Friday" to "⚡",
+        "Venom" to "🖤"
+    )
+
+    Row(
+        modifier = modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.Center,
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Row(
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            characters.forEach { (name, emoji) ->
+                val isSelected = selectedCharacter.equals(name, ignoreCase = true)
+                val bg = if (isSelected) RosePink else PearlWhiteSurface
+                val textColor = if (isSelected) Color.White else TextPrimary
+                val borderColor = if (isSelected) RosePink else PinkyBorder
+
+                Box(
+                    modifier = Modifier
+                        .clip(RoundedCornerShape(16.dp))
+                        .background(bg)
+                        .border(1.dp, borderColor, RoundedCornerShape(16.dp))
+                        .clickable { onSelectCharacter(name) }
+                        .padding(horizontal = 12.dp, vertical = 6.dp),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Text(emoji, fontSize = 12.sp)
+                        Spacer(Modifier.width(4.dp))
+                        Text(
+                            text = name,
+                            color = textColor,
+                            fontSize = 11.sp,
+                            fontWeight = if (isSelected) FontWeight.Bold else FontWeight.SemiBold
+                        )
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun SubtitlesCard(
+    latestTranscript: String,
+    isSpeaking: Boolean,
+    modifier: Modifier = Modifier
+) {
+    Card(
+        modifier = modifier.fillMaxWidth(0.92f),
+        colors = CardDefaults.cardColors(containerColor = PearlWhiteSurface),
+        shape = RoundedCornerShape(20.dp),
+        border = BorderStroke(1.dp, PinkyBorder),
+        elevation = CardDefaults.cardElevation(defaultElevation = 2.dp)
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 16.dp, vertical = 12.dp),
+            horizontalAlignment = Alignment.CenterHorizontally
+        ) {
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.Center,
+                modifier = Modifier.padding(bottom = 4.dp)
+            ) {
+                Box(
+                    modifier = Modifier
+                        .size(6.dp)
+                        .clip(CircleShape)
+                        .background(if (isSpeaking) RosePink else SoftViolet)
+                )
+                Spacer(Modifier.width(6.dp))
+                Text(
+                    text = if (isSpeaking) "Soltini Speaking" else "Live Subtitles",
+                    color = if (isSpeaking) RosePink else SoftViolet,
+                    fontSize = 10.sp,
+                    fontWeight = FontWeight.Bold,
+                    letterSpacing = 0.5.sp
+                )
+            }
+
+            Text(
+                text = latestTranscript,
+                color = TextPrimary,
+                fontSize = 13.sp,
+                lineHeight = 18.sp,
+                fontWeight = FontWeight.Medium,
+                textAlign = TextAlign.Center,
+                maxLines = 3,
+                overflow = TextOverflow.Ellipsis
+            )
+        }
+    }
+}
+
+@Composable
+private fun VoiceTopBar(
     connectionState: ConnectionState,
-    onOpenLogs: () -> Unit,
-    onOpenSettings: () -> Unit,
+    isPaused: Boolean,
+    onToggleChat: () -> Unit,
     onReconnect: () -> Unit
 ) {
     Row(
@@ -296,649 +471,439 @@ private fun TopBar(
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.SpaceBetween
     ) {
-        // Brand
         Row(verticalAlignment = Alignment.CenterVertically) {
             Box(
                 modifier = Modifier
-                    .size(36.dp)
-                    .clip(CircleShape)
+                    .size(38.dp)
+                    .clip(RoundedCornerShape(12.dp))
                     .background(
-                        Brush.linearGradient(listOf(AccentBlue, AccentPurple))
+                        Brush.linearGradient(listOf(RosePink, SoftViolet))
                     ),
                 contentAlignment = Alignment.Center
             ) {
-                Icon(Icons.Default.SmartToy, null, tint = Color.White, modifier = Modifier.size(20.dp))
+                Text("S", color = Color.White, fontWeight = FontWeight.Black, fontSize = 17.sp)
             }
-            Spacer(modifier = Modifier.width(10.dp))
+            Spacer(Modifier.width(10.dp))
             Column {
-                Text("Soltini", color = TextPrimary, fontWeight = FontWeight.Bold, fontSize = 17.sp)
-                Text("AI Assistant", color = TextSecondary, fontSize = 11.sp)
+                Text(
+                    text = "SOLTINI",
+                    color = TextPrimary,
+                    fontWeight = FontWeight.Black,
+                    fontSize = 16.sp,
+                    letterSpacing = 1.sp
+                )
+                VoiceStatusBadge(connectionState = connectionState, isPaused = isPaused)
             }
         }
 
-        // Actions
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            StatusPill(connectionState)
-            Spacer(modifier = Modifier.width(4.dp))
+        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
             if (connectionState == ConnectionState.Disconnected || connectionState == ConnectionState.Error) {
                 IconButton(onClick = onReconnect, modifier = Modifier.size(36.dp)) {
-                    Icon(Icons.Default.Refresh, null, tint = AccentBlue, modifier = Modifier.size(20.dp))
+                    Icon(Icons.Default.Refresh, "Reconnect", tint = RosePink, modifier = Modifier.size(20.dp))
                 }
             }
-            IconButton(onClick = onOpenLogs, modifier = Modifier.size(36.dp)) {
-                Icon(Icons.Default.BugReport, null, tint = TextSecondary, modifier = Modifier.size(20.dp))
-            }
-            IconButton(onClick = onOpenSettings, modifier = Modifier.size(36.dp)) {
-                Icon(Icons.Default.Settings, null, tint = TextSecondary, modifier = Modifier.size(20.dp))
+
+            Box(
+                modifier = Modifier
+                    .clip(RoundedCornerShape(16.dp))
+                    .background(PearlWhiteSurface)
+                    .border(1.dp, PinkyBorder, RoundedCornerShape(16.dp))
+                    .clickable { onToggleChat() }
+                    .padding(horizontal = 10.dp, vertical = 6.dp)
+            ) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Icon(Icons.Default.Chat, "History", tint = RosePink, modifier = Modifier.size(14.dp))
+                    Spacer(Modifier.width(4.dp))
+                    Text("History", color = TextPrimary, fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                }
             }
         }
     }
 }
 
 @Composable
-private fun StatusPill(connectionState: ConnectionState) {
-    val (color, label) = when (connectionState) {
-        ConnectionState.Live -> GreenLive to "Live"
-        ConnectionState.Connecting -> AmberConnecting to "Connecting"
-        ConnectionState.Reconnecting -> AmberConnecting to "Reconnecting"
-        ConnectionState.Disconnected -> Color.Gray to "Offline"
-        ConnectionState.Error -> RedError to "Error"
+private fun VoiceStatusBadge(connectionState: ConnectionState, isPaused: Boolean) {
+    val (color, label) = when {
+        isPaused -> RubyShield to "Paused (Banking)"
+        connectionState == ConnectionState.Live -> EmeraldLive to "Live Audio"
+        connectionState == ConnectionState.Connecting -> AmberConnecting to "Connecting"
+        connectionState == ConnectionState.Reconnecting -> AmberConnecting to "Reconnecting"
+        connectionState == ConnectionState.Error -> RedError to "Connection Error"
+        else -> TextSecondary to "Offline"
     }
-    val animColor by animateColorAsState(color, tween(400), label = "pill")
 
-    Row(
-        verticalAlignment = Alignment.CenterVertically,
-        modifier = Modifier
-            .clip(RoundedCornerShape(20.dp))
-            .background(animColor.copy(alpha = 0.12f))
-            .border(1.dp, animColor.copy(alpha = 0.3f), RoundedCornerShape(20.dp))
-            .padding(horizontal = 10.dp, vertical = 5.dp)
-    ) {
+    Row(verticalAlignment = Alignment.CenterVertically) {
         Box(
-            modifier = Modifier.size(7.dp).clip(CircleShape).background(animColor)
+            modifier = Modifier
+                .size(6.dp)
+                .clip(CircleShape)
+                .background(color)
         )
-        Spacer(modifier = Modifier.width(5.dp))
-        Text(label, color = animColor, fontSize = 11.sp, fontWeight = FontWeight.SemiBold)
+        Spacer(Modifier.width(5.dp))
+        Text(text = label, color = color, fontSize = 10.sp, fontWeight = FontWeight.Bold)
     }
 }
 
-// ── Hero Waveform Card ─────────────────────────────────────────────────────────
 @Composable
-private fun HeroWaveCard(
+private fun VoiceFloatingDock(
     connectionState: ConnectionState,
     isSpeaking: Boolean,
     isMuted: Boolean,
     isPaused: Boolean,
-    amplitude: Float,
-    onToggleMute: () -> Unit
+    onToggleMute: () -> Unit,
+    onTogglePause: () -> Unit,
+    onToggleChat: () -> Unit,
+    modifier: Modifier = Modifier
 ) {
-    val isLive = connectionState == ConnectionState.Live && !isPaused
-    val animAmp by animateFloatAsState(amplitude, tween(80), label = "amp")
+    Card(
+        modifier = modifier.fillMaxWidth(),
+        colors = CardDefaults.cardColors(containerColor = PearlWhiteSurface),
+        shape = RoundedCornerShape(28.dp),
+        border = BorderStroke(1.dp, PinkyBorder),
+        elevation = CardDefaults.cardElevation(defaultElevation = 6.dp)
+    ) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 18.dp, vertical = 10.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.SpaceBetween
+        ) {
+            // Banking Shield Quick Pause
+            IconButton(
+                onClick = onTogglePause,
+                modifier = Modifier
+                    .size(46.dp)
+                    .clip(CircleShape)
+                    .background(if (isPaused) RubyShield.copy(alpha = 0.15f) else PinkyWhiteBackground)
+                    .border(1.dp, if (isPaused) RubyShield.copy(alpha = 0.35f) else PinkyBorder, CircleShape)
+            ) {
+                Icon(
+                    imageVector = if (isPaused) Icons.Default.PlayArrow else Icons.Default.Shield,
+                    contentDescription = "Banking Shield",
+                    tint = if (isPaused) RubyShield else TextSecondary,
+                    modifier = Modifier.size(20.dp)
+                )
+            }
 
-    val waveColor = when {
-        !isLive -> AccentBlue.copy(alpha = 0.4f)
-        isMuted -> Color.Gray.copy(alpha = 0.5f)
-        isSpeaking -> AccentPink
-        else -> AccentTeal
-    }
-    val animWaveColor by animateColorAsState(waveColor, tween(500), label = "wave")
+            // Big Central Rose Pink Mic Button
+            FloatingActionButton(
+                onClick = onToggleMute,
+                containerColor = if (isMuted) Color(0xFFF1F5F9) else RosePink,
+                contentColor = if (isMuted) TextSecondary else Color.White,
+                shape = CircleShape,
+                modifier = Modifier.size(58.dp)
+            ) {
+                Icon(
+                    imageVector = if (isMuted) Icons.Default.MicOff else Icons.Default.Mic,
+                    contentDescription = if (isMuted) "Unmute" else "Mute",
+                    modifier = Modifier.size(26.dp)
+                )
+            }
 
-    val statusText = when {
-        isPaused -> "⏸ Paused — accessibility & mic fully off"
-        !isLive -> "Disconnected — tap ↻ to reconnect"
-        isMuted -> "Microphone muted"
-        isSpeaking -> "Soltini is speaking..."
-        else -> "Listening..."
+            // Conversation History Button
+            IconButton(
+                onClick = onToggleChat,
+                modifier = Modifier
+                    .size(46.dp)
+                    .clip(CircleShape)
+                    .background(PinkyWhiteBackground)
+                    .border(1.dp, PinkyBorder, CircleShape)
+            ) {
+                Icon(
+                    imageVector = Icons.Default.Chat,
+                    contentDescription = "Conversation History",
+                    tint = RosePink,
+                    modifier = Modifier.size(20.dp)
+                )
+            }
+        }
     }
+}
+
+@Composable
+private fun VoiceQuickActionsRow(
+    onTrigger: (macroName: String, prompt: String) -> Unit,
+    modifier: Modifier = Modifier
+) {
+    val macros = listOf(
+        "📸 Read Screen" to "Take a screenshot and describe everything on my screen",
+        "💬 WhatsApp"    to "Open WhatsApp and help me compose a message",
+        "▶️ YouTube"     to "Open YouTube and play relaxing music",
+        "🔒 Lock Device" to "Lock the device screen right now"
+    )
+
+    LazyRow(
+        modifier = modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.spacedBy(8.dp)
+    ) {
+        items(macros) { (title, prompt) ->
+            Box(
+                modifier = Modifier
+                    .clip(RoundedCornerShape(16.dp))
+                    .background(PearlWhiteSurface)
+                    .border(1.dp, PinkyBorder, RoundedCornerShape(16.dp))
+                    .clickable { onTrigger(title, prompt) }
+                    .padding(horizontal = 14.dp, vertical = 8.dp)
+            ) {
+                Text(
+                    text = title,
+                    color = TextPrimary,
+                    fontSize = 11.sp,
+                    fontWeight = FontWeight.SemiBold
+                )
+            }
+        }
+    }
+}
+
+@OptIn(androidx.compose.foundation.ExperimentalFoundationApi::class)
+@Composable
+private fun ConversationHistorySheet(
+    transcripts: List<TranscriptEntry>,
+    onClose: () -> Unit,
+    onClear: () -> Unit
+) {
+    val context = LocalContext.current
+    val clipboardManager = LocalClipboardManager.current
 
     Card(
         modifier = Modifier
             .fillMaxWidth()
-            .height(200.dp),
-        colors = CardDefaults.cardColors(containerColor = DarkSurface),
-        shape = RoundedCornerShape(24.dp),
-        border = androidx.compose.foundation.BorderStroke(1.dp, DarkBorder)
-    ) {
-        Box(modifier = Modifier.fillMaxSize()) {
-            // Background gradient
-            Box(
-                modifier = Modifier
-                    .fillMaxSize()
-                    .background(
-                        Brush.verticalGradient(
-                            listOf(
-                                animWaveColor.copy(alpha = 0.06f),
-                                Color.Transparent
-                            )
-                        )
-                    )
-            )
-
-            // Waveform canvas
-            Canvas(
-                modifier = Modifier
-                    .fillMaxSize()
-                    .padding(horizontal = 24.dp, vertical = 40.dp)
-            ) {
-                val midY = size.height / 2f
-                val barCount = 48
-                val barSpacing = size.width / barCount
-                val maxBarH = size.height * 0.45f
-
-                val time = System.currentTimeMillis() / 1000f
-
-                for (i in 0 until barCount) {
-                    val normalizedPos = i.toFloat() / barCount
-                    // Smooth sine wave with amplitude modulation
-                    val baseWave = sin((normalizedPos * Math.PI * 6 + time * 2.5f).toFloat()) * 0.3f + 0.3f
-                    val ampBoost = animAmp * sin((normalizedPos * Math.PI * 4).toFloat()).coerceAtLeast(0f)
-                    val barH = ((baseWave + ampBoost) * maxBarH).coerceIn(4.dp.toPx(), maxBarH)
-
-                    val x = i * barSpacing + barSpacing / 2
-                    val alpha = if (!isLive) 0.3f else (0.5f + normalizedPos * 0.5f).coerceIn(0.3f, 1f)
-
-                    drawLine(
-                        color = animWaveColor.copy(alpha = alpha),
-                        start = Offset(x, midY - barH / 2),
-                        end = Offset(x, midY + barH / 2),
-                        strokeWidth = 3.dp.toPx(),
-                        cap = StrokeCap.Round
-                    )
-                }
-            }
-
-            // Bottom info row
-            Row(
-                modifier = Modifier
-                    .align(Alignment.BottomStart)
-                    .fillMaxWidth()
-                    .padding(16.dp),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                Column {
-                    Text(
-                        statusText,
-                        color = if (isSpeaking) animWaveColor else TextSecondary,
-                        fontSize = 13.sp,
-                        fontWeight = if (isSpeaking) FontWeight.SemiBold else FontWeight.Normal
-                    )
-                    Text(
-                        "Orb active on overlay →",
-                        color = TextSecondary.copy(alpha = 0.5f),
-                        fontSize = 10.sp
-                    )
-                }
-
-                // Mute FAB
-                FloatingActionButton(
-                    onClick = onToggleMute,
-                    containerColor = if (isMuted) RedError.copy(0.2f) else DarkSurfaceVariant,
-                    contentColor = if (isMuted) RedError else TextPrimary,
-                    shape = CircleShape,
-                    modifier = Modifier.size(44.dp)
-                ) {
-                    Icon(
-                        imageVector = if (isMuted) Icons.Default.MicOff else Icons.Default.Mic,
-                        contentDescription = if (isMuted) "Unmute" else "Mute",
-                        modifier = Modifier.size(20.dp)
-                    )
-                }
-            }
-        }
-    }
-}
-
-// ── Command Chips Row ──────────────────────────────────────────────────────────
-private val voiceCommands = listOf(
-    "Open WhatsApp",
-    "Lock the screen",
-    "Open Camera",
-    "Go to sleep",
-    "Wake the screen",
-    "Open YouTube",
-    "Open Settings",
-    "Open Maps"
-)
-
-@Composable
-private fun CommandChipsRow() {
-    Column {
-        Text(
-            "Try saying...",
-            color = TextSecondary,
-            fontSize = 12.sp,
-            fontWeight = FontWeight.SemiBold,
-            modifier = Modifier.padding(bottom = 8.dp)
-        )
-        LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            items(voiceCommands) { cmd ->
-                Box(
-                    modifier = Modifier
-                        .clip(RoundedCornerShape(20.dp))
-                        .background(DarkSurface)
-                        .border(1.dp, DarkBorder, RoundedCornerShape(20.dp))
-                        .padding(horizontal = 14.dp, vertical = 8.dp)
-                ) {
-                    Text(
-                        "\"$cmd\"",
-                        color = TextSecondary,
-                        fontSize = 12.sp,
-                        fontWeight = FontWeight.Medium
-                    )
-                }
-            }
-        }
-    }
-}
-
-// ── Agent Status Row ───────────────────────────────────────────────────────────
-@Composable
-private fun AgentStatusRow(
-    hasAssistant: Boolean,
-    hasAccessibility: Boolean,
-    onOpenSettings: () -> Unit
-) {
-    Column {
-        Text(
-            "Agent Capabilities",
-            color = TextSecondary,
-            fontSize = 12.sp,
-            fontWeight = FontWeight.SemiBold,
-            modifier = Modifier.padding(bottom = 8.dp)
-        )
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.spacedBy(10.dp)
-        ) {
-            AgentCapCard(
-                modifier = Modifier.weight(1f),
-                icon = Icons.Default.Assistant,
-                title = "Default Assistant",
-                subtitle = if (hasAssistant) "Active" else "Tap to enable",
-                isActive = hasAssistant,
-                activeColor = AccentBlue,
-                onClick = onOpenSettings
-            )
-            AgentCapCard(
-                modifier = Modifier.weight(1f),
-                icon = Icons.Default.Lock,
-                title = "Lock Screen",
-                subtitle = if (hasAccessibility) "Active" else "Tap to enable",
-                isActive = hasAccessibility,
-                activeColor = AccentPurple,
-                onClick = onOpenSettings
-            )
-        }
-    }
-}
-
-@Composable
-private fun AgentCapCard(
-    modifier: Modifier = Modifier,
-    icon: ImageVector,
-    title: String,
-    subtitle: String,
-    isActive: Boolean,
-    activeColor: Color,
-    onClick: () -> Unit
-) {
-    val borderColor by animateColorAsState(
-        if (isActive) activeColor.copy(0.5f) else DarkBorder, tween(500), label = "border"
-    )
-
-    Card(
-        modifier = modifier
-            .height(100.dp)
-            .clickable { onClick() },
-        colors = CardDefaults.cardColors(
-            containerColor = if (isActive) activeColor.copy(0.08f) else DarkSurface
-        ),
-        shape = RoundedCornerShape(18.dp),
-        border = androidx.compose.foundation.BorderStroke(1.dp, borderColor)
+            .height(440.dp),
+        shape = RoundedCornerShape(topStart = 28.dp, topEnd = 28.dp),
+        colors = CardDefaults.cardColors(containerColor = PearlWhiteSurface),
+        border = BorderStroke(1.dp, PinkyBorder),
+        elevation = CardDefaults.cardElevation(defaultElevation = 10.dp)
     ) {
         Column(
             modifier = Modifier
                 .fillMaxSize()
-                .padding(14.dp),
-            verticalArrangement = Arrangement.SpaceBetween
+                .padding(16.dp)
         ) {
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.Top
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text("Conversation History", color = TextPrimary, fontWeight = FontWeight.Bold, fontSize = 16.sp)
+                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                    if (transcripts.isNotEmpty()) {
+                        Text(
+                            "Copy All",
+                            color = SoftViolet,
+                            fontSize = 12.sp,
+                            fontWeight = FontWeight.Bold,
+                            modifier = Modifier
+                                .clickable {
+                                    val fullConversation = transcripts.joinToString("\n\n") {
+                                        val speaker = if (it.sender == TranscriptEntry.Sender.USER) "You" else "Soltini"
+                                        "$speaker: ${it.text}"
+                                    }
+                                    clipboardManager.setText(AnnotatedString(fullConversation))
+                                    Toast.makeText(context, "Full conversation copied", Toast.LENGTH_SHORT).show()
+                                }
+                                .padding(horizontal = 6.dp, vertical = 4.dp)
+                        )
+                    }
+                    Text(
+                        "Clear",
+                        color = RosePink,
+                        fontSize = 12.sp,
+                        fontWeight = FontWeight.Bold,
+                        modifier = Modifier
+                            .clickable { onClear() }
+                            .padding(horizontal = 6.dp, vertical = 4.dp)
+                    )
+                    Text(
+                        "Close",
+                        color = TextSecondary,
+                        fontSize = 12.sp,
+                        modifier = Modifier
+                            .clickable { onClose() }
+                            .padding(horizontal = 6.dp, vertical = 4.dp)
+                    )
+                }
+            }
+
+            Spacer(Modifier.height(10.dp))
+
+            if (transcripts.isEmpty()) {
+                Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                    Text("No conversation yet. Speak to Soltini!", color = TextSecondary, fontSize = 13.sp)
+                }
+            } else {
+                LazyColumn(
+                    modifier = Modifier.fillMaxSize(),
+                    verticalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    items(transcripts, key = { it.id }) { entry ->
+                        val isUser = entry.sender == TranscriptEntry.Sender.USER
+                        val bg = if (isUser) RosePink.copy(alpha = 0.12f) else PinkyWhiteBackground
+                        val align = if (isUser) Alignment.End else Alignment.Start
+
+                        Column(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalAlignment = align
+                        ) {
+                            Text(
+                                text = if (isUser) "You" else "Soltini",
+                                color = if (isUser) RosePink else SoftViolet,
+                                fontSize = 10.sp,
+                                fontWeight = FontWeight.Bold,
+                                modifier = Modifier.padding(horizontal = 4.dp, vertical = 2.dp)
+                            )
+
+                            Box(
+                                modifier = Modifier
+                                    .clip(
+                                        RoundedCornerShape(
+                                            topStart = 20.dp,
+                                            topEnd = 20.dp,
+                                            bottomStart = if (isUser) 20.dp else 6.dp,
+                                            bottomEnd = if (isUser) 6.dp else 20.dp
+                                        )
+                                    )
+                                    .background(bg)
+                                    .border(1.dp, PinkyBorder, RoundedCornerShape(
+                                        topStart = 20.dp,
+                                        topEnd = 20.dp,
+                                        bottomStart = if (isUser) 20.dp else 6.dp,
+                                        bottomEnd = if (isUser) 6.dp else 20.dp
+                                    ))
+                                    .combinedClickable(
+                                        onClick = {},
+                                        onLongClick = {
+                                            clipboardManager.setText(AnnotatedString(entry.text))
+                                            Toast.makeText(context, "Copied", Toast.LENGTH_SHORT).show()
+                                        }
+                                    )
+                                    .padding(horizontal = 16.dp, vertical = 10.dp)
+                            ) {
+                                Text(
+                                    text = entry.text,
+                                    color = TextPrimary,
+                                    fontSize = 13.5.sp,
+                                    lineHeight = 19.sp
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun FloatingOverlayPromptBanner(
+    onEnable: () -> Unit,
+    onDismiss: () -> Unit
+) {
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        shape = RoundedCornerShape(22.dp),
+        colors = CardDefaults.cardColors(containerColor = PearlWhiteSurface),
+        border = BorderStroke(1.5.dp, PinkyBorder),
+        elevation = CardDefaults.cardElevation(defaultElevation = 4.dp)
+    ) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 14.dp, vertical = 12.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.SpaceBetween
+        ) {
+            Row(
+                modifier = Modifier.weight(1f),
+                verticalAlignment = Alignment.CenterVertically
             ) {
                 Box(
                     modifier = Modifier
-                        .size(34.dp)
-                        .clip(RoundedCornerShape(10.dp))
-                        .background(if (isActive) activeColor.copy(0.18f) else DarkSurfaceVariant),
+                        .size(40.dp)
+                        .clip(CircleShape)
+                        .background(RosePink.copy(alpha = 0.12f))
+                        .border(1.dp, RosePink.copy(alpha = 0.25f), CircleShape),
                     contentAlignment = Alignment.Center
                 ) {
-                    Icon(icon, null, tint = if (isActive) activeColor else TextSecondary, modifier = Modifier.size(18.dp))
+                    Icon(
+                        imageVector = Icons.Default.Layers,
+                        contentDescription = null,
+                        tint = RosePink,
+                        modifier = Modifier.size(20.dp)
+                    )
                 }
-                if (isActive) {
-                    Icon(Icons.Default.CheckCircle, null, tint = activeColor, modifier = Modifier.size(16.dp))
+                Spacer(Modifier.width(12.dp))
+                Column {
+                    Text(
+                        text = "Enable Floating Voice Orb",
+                        color = TextPrimary,
+                        fontSize = 13.5.sp,
+                        fontWeight = FontWeight.Bold
+                    )
+                    Spacer(Modifier.height(2.dp))
+                    Text(
+                        text = "Access Soltini anywhere over other apps",
+                        color = TextSecondary,
+                        fontSize = 11.sp,
+                        lineHeight = 15.sp
+                    )
                 }
             }
-            Column {
-                Text(title, color = TextPrimary, fontWeight = FontWeight.SemiBold, fontSize = 13.sp)
-                Text(subtitle, color = if (isActive) activeColor else TextSecondary, fontSize = 11.sp)
-            }
-        }
-    }
-}
 
-// ── Transcript ─────────────────────────────────────────────────────────────────
-@Composable
-private fun TranscriptHeader(onClear: () -> Unit) {
-    Row(
-        modifier = Modifier.fillMaxWidth(),
-        horizontalArrangement = Arrangement.SpaceBetween,
-        verticalAlignment = Alignment.CenterVertically
-    ) {
-        Text("Conversation", color = TextSecondary, fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
-        Text(
-            "Clear",
-            color = AccentBlue,
-            fontSize = 12.sp,
-            fontWeight = FontWeight.SemiBold,
-            modifier = Modifier.clickable { onClear() }
-        )
-    }
-}
+            Spacer(Modifier.width(8.dp))
 
-@Composable
-private fun TranscriptBubble(entry: TranscriptEntry) {
-    val isUser = entry.sender == TranscriptEntry.Sender.USER
-    val bubbleShape = RoundedCornerShape(
-        topStart = if (isUser) 18.dp else 4.dp,
-        topEnd = if (isUser) 4.dp else 18.dp,
-        bottomStart = 18.dp,
-        bottomEnd = 18.dp
-    )
-    Row(
-        modifier = Modifier.fillMaxWidth(),
-        horizontalArrangement = if (isUser) Arrangement.End else Arrangement.Start
-    ) {
-        if (!isUser) {
-            Box(
-                modifier = Modifier
-                    .size(28.dp)
-                    .clip(CircleShape)
-                    .background(
-                        Brush.linearGradient(listOf(AccentBlue, AccentPurple))
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Button(
+                    onClick = onEnable,
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = RosePink,
+                        contentColor = Color.White
                     ),
-                contentAlignment = Alignment.Center
-            ) {
-                Icon(Icons.Default.SmartToy, null, tint = Color.White, modifier = Modifier.size(14.dp))
-            }
-            Spacer(modifier = Modifier.width(8.dp))
-        }
-        // Always use Brush so both branches return the same type
-        val bubbleBrush: Brush = if (isUser) {
-            Brush.linearGradient(listOf(DarkSurfaceVariant, DarkSurfaceVariant))
-        } else {
-            Brush.linearGradient(listOf(AccentBlue.copy(0.15f), AccentPurple.copy(0.10f)))
-        }
-        val bubbleBorder = if (isUser) DarkBorder else AccentBlue.copy(0.2f)
+                    shape = RoundedCornerShape(14.dp),
+                    modifier = Modifier.height(34.dp),
+                    contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 14.dp)
+                ) {
+                    Text("Enable", fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                }
 
-        Box(
-            modifier = Modifier
-                .fillMaxWidth(0.80f)
-                .clip(bubbleShape)
-                .background(bubbleBrush)
-                .border(1.dp, bubbleBorder, bubbleShape)
-                .padding(12.dp)
-        ) {
-            Text(entry.text, color = TextPrimary, fontSize = 14.sp, lineHeight = 20.sp)
+                Spacer(Modifier.width(4.dp))
+
+                IconButton(onClick = onDismiss, modifier = Modifier.size(30.dp)) {
+                    Icon(
+                        imageVector = Icons.Default.Close,
+                        contentDescription = "Dismiss",
+                        tint = TextSecondary,
+                        modifier = Modifier.size(16.dp)
+                    )
+                }
+            }
         }
     }
 }
 
-// ── Error Card ─────────────────────────────────────────────────────────────────
 @Composable
-private fun ErrorCard(error: String, onRetry: () -> Unit) {
+fun ErrorCard(errorMessage: String, onRetry: () -> Unit) {
     Card(
         modifier = Modifier.fillMaxWidth(),
         colors = CardDefaults.cardColors(containerColor = RedError.copy(alpha = 0.08f)),
-        shape = RoundedCornerShape(16.dp),
-        border = androidx.compose.foundation.BorderStroke(1.dp, RedError.copy(alpha = 0.3f))
+        shape = RoundedCornerShape(20.dp),
+        border = BorderStroke(1.dp, RedError.copy(alpha = 0.3f))
     ) {
         Row(
             modifier = Modifier.padding(14.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
-            Icon(Icons.Default.WifiOff, null, tint = RedError, modifier = Modifier.size(20.dp))
-            Spacer(modifier = Modifier.width(10.dp))
-            Text(error, color = RedError, modifier = Modifier.weight(1f), fontSize = 12.sp)
-            IconButton(onClick = onRetry) {
-                Icon(Icons.Default.Refresh, "Retry", tint = RedError, modifier = Modifier.size(20.dp))
-            }
-        }
-    }
-}
-
-// ── Pause Mode Card ────────────────────────────────────────────────────────────
-@Composable
-private fun PauseModeCard(
-    isPaused: Boolean,
-    onToggle: () -> Unit
-) {
-    // Delegate to the full dual-mode card with just lite pause
-    DualPauseModeCard(
-        isLitePaused = isPaused,
-        isHardPaused = false,
-        onToggleLite = onToggle,
-        onToggleHard = {}
-    )
-}
-
-@Composable
-fun DualPauseModeCard(
-    isLitePaused: Boolean,
-    isHardPaused: Boolean,
-    onToggleLite: () -> Unit,
-    onToggleHard: () -> Unit
-) {
-    val isAnyPaused = isLitePaused || isHardPaused
-
-    val inf = rememberInfiniteTransition(label = "pausePulse")
-    val pulseAlpha by inf.animateFloat(
-        initialValue = if (isAnyPaused) 0.3f else 0.04f,
-        targetValue  = if (isAnyPaused) 0.6f else 0.14f,
-        animationSpec = infiniteRepeatable(
-            tween(if (isAnyPaused) 700 else 2400, easing = FastOutSlowInEasing),
-            RepeatMode.Reverse
-        ),
-        label = "pulseAlpha"
-    )
-
-    val liteColor = Color(0xFFFF8C00)  // amber
-    val hardColor = Color(0xFFE53935)  // red
-    val idleColor = AccentBlue
-
-    val headerColor = when {
-        isHardPaused -> hardColor
-        isLitePaused -> liteColor
-        else         -> idleColor
-    }
-    val animHeaderColor by animateColorAsState(headerColor, tween(350), label = "hc")
-
-    Column(modifier = Modifier.fillMaxWidth()) {
-        // Section label
-        Text(
-            "Banking Mode",
-            color = TextSecondary,
-            fontSize = 12.sp,
-            fontWeight = FontWeight.SemiBold,
-            modifier = androidx.compose.ui.Modifier.padding(bottom = 8.dp)
-        )
-
-        Card(
-            modifier = Modifier.fillMaxWidth(),
-            colors = CardDefaults.cardColors(
-                containerColor = animHeaderColor.copy(alpha = 0.06f + pulseAlpha * 0.4f)
-            ),
-            shape = RoundedCornerShape(20.dp),
-            border = androidx.compose.foundation.BorderStroke(
-                1.5.dp, animHeaderColor.copy(alpha = 0.25f + pulseAlpha)
+            Icon(Icons.Default.Warning, null, tint = RedError, modifier = Modifier.size(20.dp))
+            Spacer(Modifier.width(8.dp))
+            Text(errorMessage, color = RedError, fontSize = 12.sp, modifier = Modifier.weight(1f))
+            Text(
+                "Retry",
+                color = RedError,
+                fontWeight = FontWeight.Bold,
+                fontSize = 12.sp,
+                modifier = Modifier.clickable { onRetry() }.padding(4.dp)
             )
-        ) {
-            Column(modifier = Modifier.padding(16.dp)) {
-
-                // ── Status banner ────────────────────────────────────────────
-                Row(
-                    verticalAlignment = Alignment.CenterVertically,
-                    modifier = Modifier.padding(bottom = 14.dp)
-                ) {
-                    Box(
-                        modifier = Modifier
-                            .size(40.dp)
-                            .clip(CircleShape)
-                            .background(animHeaderColor.copy(alpha = 0.15f + pulseAlpha)),
-                        contentAlignment = Alignment.Center
-                    ) {
-                        Icon(
-                            imageVector = when {
-                                isHardPaused -> Icons.Default.Warning
-                                isLitePaused -> Icons.Default.Pause
-                                else         -> Icons.Default.Lock
-                            },
-                            contentDescription = null,
-                            tint = animHeaderColor,
-                            modifier = Modifier.size(22.dp)
-                        )
-                    }
-                    Spacer(modifier = Modifier.width(12.dp))
-                    Column {
-                        Text(
-                            text = when {
-                                isHardPaused -> "Force Stopped — Open app to resume"
-                                isLitePaused -> "Lite Paused — Accessibility silenced"
-                                else         -> "Pause for Banking Apps"
-                            },
-                            color = TextPrimary,
-                            fontWeight = FontWeight.Bold,
-                            fontSize = 14.sp
-                        )
-                        Text(
-                            text = when {
-                                isHardPaused -> "Opening Settings → Accessibility on resume"
-                                isLitePaused -> "Mic & AI off. Instant resume, no re-enable."
-                                else         -> "Choose a pause level below"
-                            },
-                            color = if (isAnyPaused) animHeaderColor.copy(0.85f) else TextSecondary,
-                            fontSize = 11.sp
-                        )
-                    }
-                }
-
-                // ── Two buttons ──────────────────────────────────────────────
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.spacedBy(10.dp)
-                ) {
-                    // Lite Pause button
-                    val liteActive = isLitePaused
-                    Box(
-                        modifier = Modifier
-                            .weight(1f)
-                            .clip(RoundedCornerShape(14.dp))
-                            .background(
-                                if (liteActive) liteColor.copy(0.18f)
-                                else DarkSurface
-                            )
-                            .border(
-                                1.dp,
-                                if (liteActive) liteColor.copy(0.6f) else DarkBorder,
-                                RoundedCornerShape(14.dp)
-                            )
-                            .clickable { onToggleLite() }
-                            .padding(12.dp)
-                    ) {
-                        Column(horizontalAlignment = Alignment.CenterHorizontally,
-                               modifier = Modifier.fillMaxWidth()) {
-                            Icon(
-                                imageVector = if (liteActive) Icons.Default.PlayArrow else Icons.Default.Pause,
-                                contentDescription = null,
-                                tint = if (liteActive) liteColor else TextSecondary,
-                                modifier = Modifier.size(20.dp)
-                            )
-                            Spacer(Modifier.height(6.dp))
-                            Text(
-                                if (liteActive) "Resume" else "Lite Pause",
-                                color = if (liteActive) liteColor else TextPrimary,
-                                fontWeight = FontWeight.SemiBold,
-                                fontSize = 13.sp
-                            )
-                            Text(
-                                "GPay · PhonePe · Paytm",
-                                color = TextSecondary,
-                                fontSize = 10.sp
-                            )
-                        }
-                    }
-
-                    // Hard Pause button
-                    val hardActive = isHardPaused
-                    Box(
-                        modifier = Modifier
-                            .weight(1f)
-                            .clip(RoundedCornerShape(14.dp))
-                            .background(
-                                if (hardActive) hardColor.copy(0.18f)
-                                else DarkSurface
-                            )
-                            .border(
-                                1.dp,
-                                if (hardActive) hardColor.copy(0.6f) else DarkBorder,
-                                RoundedCornerShape(14.dp)
-                            )
-                            .clickable { onToggleHard() }
-                            .padding(12.dp)
-                    ) {
-                        Column(horizontalAlignment = Alignment.CenterHorizontally,
-                               modifier = Modifier.fillMaxWidth()) {
-                            Icon(
-                                imageVector = if (hardActive) Icons.Default.PlayArrow else Icons.Default.Warning,
-                                contentDescription = null,
-                                tint = if (hardActive) hardColor else TextSecondary,
-                                modifier = Modifier.size(20.dp)
-                            )
-                            Spacer(Modifier.height(6.dp))
-                            Text(
-                                if (hardActive) "Resume" else "Force Stop",
-                                color = if (hardActive) hardColor else TextPrimary,
-                                fontWeight = FontWeight.SemiBold,
-                                fontSize = 13.sp
-                            )
-                            Text(
-                                "HDFC · ICICI · SBI",
-                                color = TextSecondary,
-                                fontSize = 10.sp
-                            )
-                        }
-                    }
-                }
-            }
         }
     }
-}
-
-
-// ── Permission check helpers for home ─────────────────────────────────────────
-private fun checkAssistantRoleHome(context: Context): Boolean {
-    return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-        val rm = context.getSystemService(Context.ROLE_SERVICE) as RoleManager
-        rm.isRoleHeld(RoleManager.ROLE_ASSISTANT)
-    } else false
-}
-
-private fun checkAccessibilityHome(context: Context): Boolean {
-    val enabled = android.provider.Settings.Secure.getString(
-        context.contentResolver,
-        android.provider.Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES
-    ) ?: return false
-    return enabled.contains(context.packageName, ignoreCase = true)
 }

@@ -315,13 +315,26 @@ class OverlayService : Service() {
 
         // ── Fallback removed (using RingIndicatorView as primary orb) ──
 
-        // ── Error TextView ────────────────────────────────────────────────────
+        // ── Floating Response Bubble & Error Banner ──────────────────────────
         errorTextView = TextView(this).apply {
             visibility = View.GONE
-            setTextColor(Color.RED)
-            setBackgroundColor(Color.parseColor("#CC000000"))
-            textSize = 10f
-            setPadding(8, 8, 8, 8)
+            setTextColor(Color.parseColor("#1E1926"))
+            val radius = 18 * resources.displayMetrics.density
+            val strokePx = (1.5f * resources.displayMetrics.density).toInt()
+            background = android.graphics.drawable.GradientDrawable().apply {
+                setColor(Color.WHITE)
+                cornerRadius = radius
+                setStroke(strokePx, Color.parseColor("#FCE7F3"))
+            }
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
+                elevation = 8 * resources.displayMetrics.density
+            }
+            textSize = 11.5f
+            typeface = android.graphics.Typeface.DEFAULT_BOLD
+            gravity = Gravity.CENTER
+            val padH = (12 * resources.displayMetrics.density).toInt()
+            val padV = (8 * resources.displayMetrics.density).toInt()
+            setPadding(padH, padV, padH, padV)
         }
 
 
@@ -384,8 +397,7 @@ class OverlayService : Service() {
         }
 
         overlayView.onLongPress = {
-            // Snap to nearest edge fully on long press too
-            snapToEdge(0)
+            showLongPressMenu()
         }
 
         // ── Add to window ─────────────────────────────────────────────────────
@@ -406,6 +418,22 @@ class OverlayService : Service() {
     fun showError(errorText: String) {
         mainHandler.post {
             errorTextView.visibility = View.VISIBLE
+            errorTextView.setTextColor(Color.parseColor("#E11D48"))
+            val radius = 16 * resources.displayMetrics.density
+            val strokePx = (1.5f * resources.displayMetrics.density).toInt()
+            errorTextView.background = android.graphics.drawable.GradientDrawable().apply {
+                setColor(Color.parseColor("#FFF1F2"))
+                cornerRadius = radius
+                setStroke(strokePx, Color.parseColor("#FECDD3"))
+            }
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
+                errorTextView.elevation = 6 * resources.displayMetrics.density
+            }
+            val padH = (12 * resources.displayMetrics.density).toInt()
+            val padV = (8 * resources.displayMetrics.density).toInt()
+            errorTextView.setPadding(padH, padV, padH, padV)
+            errorTextView.textSize = 11f
+            errorTextView.typeface = android.graphics.Typeface.DEFAULT_BOLD
             errorTextView.text = errorText
             // Auto hide after 10 seconds unless it's a persistent crash
             mainHandler.postDelayed({
@@ -419,18 +447,64 @@ class OverlayService : Service() {
     fun onAvatarTapped() {
         val svc = voiceService
         if (svc != null) {
-            if (svc.isSleeping.value) {
-                svc.wakeUp()
-                android.util.Log.d("OverlayService", "Avatar tapped — waking up from sleep.")
-            } else if (svc.connectionState.value == com.soltini.app.network.ConnectionState.Disconnected || 
-                       svc.connectionState.value == com.soltini.app.network.ConnectionState.Error) {
-                svc.connect()
-                android.util.Log.d("OverlayService", "Avatar tapped — reconnecting broken connection.")
-            } else {
-                android.util.Log.d("OverlayService", "Avatar tapped while active — reserved for future action.")
+            when {
+                svc.isSleeping.value -> {
+                    svc.wakeUp()
+                    android.util.Log.d("OverlayService", "Avatar tapped — waking up from sleep.")
+                }
+                svc.connectionState.value == com.soltini.app.network.ConnectionState.Disconnected ||
+                svc.connectionState.value == com.soltini.app.network.ConnectionState.Error -> {
+                    svc.connect()
+                    android.util.Log.d("OverlayService", "Avatar tapped — reconnecting.")
+                }
             }
-        } else {
-            android.util.Log.d("OverlayService", "Avatar tapped but BackgroundVoiceService not bound yet.")
+        }
+        // Always bring MainActivity to foreground (singleTop — no duplicate)
+        bringMainActivityToForeground()
+    }
+
+    /** Opens MainActivity or brings it to the foreground without creating a new instance. */
+    fun bringMainActivityToForeground(targetScreen: String = "voice") {
+        val intent = Intent(this, com.soltini.app.MainActivity::class.java).apply {
+            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_REORDER_TO_FRONT)
+            putExtra(com.soltini.app.MainActivity.EXTRA_TARGET_SCREEN, targetScreen)
+        }
+        try {
+            startActivity(intent)
+        } catch (e: Exception) {
+            android.util.Log.e("OverlayService", "Failed to launch MainActivity: ${e.message}")
+        }
+    }
+
+    /**
+     * Shows an AI response text bubble above the orb for [durationMs] milliseconds.
+     * Styled in the ultra-smooth luxury Pinky-White aesthetic.
+     */
+    fun showResponseBubble(text: String, durationMs: Long = 3500) {
+        mainHandler.post {
+            // Truncate very long responses for the bubble
+            val display = if (text.length > 100) text.take(97) + "…" else text
+            errorTextView.setTextColor(Color.parseColor("#1E1926"))
+            val radius = 18 * resources.displayMetrics.density
+            val strokePx = (1.5f * resources.displayMetrics.density).toInt()
+            errorTextView.background = android.graphics.drawable.GradientDrawable().apply {
+                setColor(Color.WHITE)
+                cornerRadius = radius
+                setStroke(strokePx, Color.parseColor("#FCE7F3"))
+            }
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
+                errorTextView.elevation = 8 * resources.displayMetrics.density
+            }
+            errorTextView.textSize = 12f
+            errorTextView.typeface = android.graphics.Typeface.DEFAULT_BOLD
+            errorTextView.text = display
+            errorTextView.visibility = View.VISIBLE
+            mainHandler.removeCallbacksAndMessages("bubble_hide")
+            mainHandler.postDelayed({
+                if (errorTextView.text == display) {
+                    errorTextView.visibility = View.GONE
+                }
+            }, durationMs)
         }
     }
 
@@ -443,6 +517,7 @@ class OverlayService : Service() {
             windowManager.updateViewLayout(overlayView, layoutParams)
         } catch (e: Exception) { /* ignore */ }
     }
+
 
     private fun createNotificationChannel() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
@@ -533,4 +608,152 @@ class OverlayService : Service() {
     }
 
     override fun onBind(intent: Intent?): IBinder? = null
+    private var popupMenuContainer: FrameLayout? = null
+
+    private fun showLongPressMenu() {
+        if (popupMenuContainer != null) return // Already showing
+
+        popupMenuContainer = FrameLayout(this).apply {
+            setBackgroundColor(Color.parseColor("#4D1E1926")) // Soft luxury dim background
+            setOnClickListener { dismissLongPressMenu() } // Tap outside to dismiss
+        }
+
+        val menuLayout = android.widget.LinearLayout(this).apply {
+            orientation = android.widget.LinearLayout.VERTICAL
+            val radius = 24 * resources.displayMetrics.density
+            val strokeWidth = (1.5f * resources.displayMetrics.density).toInt()
+            background = android.graphics.drawable.GradientDrawable().apply {
+                setColor(Color.WHITE) // PearlWhiteSurface
+                cornerRadius = radius
+                setStroke(strokeWidth, Color.parseColor("#FCE7F3")) // PinkyBorder
+            }
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
+                elevation = 16 * resources.displayMetrics.density
+            }
+            val pad = (20 * resources.displayMetrics.density).toInt()
+            setPadding(pad, pad, pad, pad)
+        }
+
+        // Header Title
+        val titleView = android.widget.TextView(this).apply {
+            text = "✨ Soltini Assistant"
+            setTextColor(Color.parseColor("#F43F8E")) // RosePink
+            textSize = 16f
+            typeface = android.graphics.Typeface.DEFAULT_BOLD
+            gravity = Gravity.CENTER
+            setPadding(0, 0, 0, (12 * resources.displayMetrics.density).toInt())
+        }
+        menuLayout.addView(titleView)
+
+        // Subtle divider
+        val divider = View(this).apply {
+            setBackgroundColor(Color.parseColor("#FCE7F3"))
+            layoutParams = android.widget.LinearLayout.LayoutParams(
+                android.widget.LinearLayout.LayoutParams.MATCH_PARENT,
+                (1 * resources.displayMetrics.density).toInt()
+            ).apply {
+                bottomMargin = (12 * resources.displayMetrics.density).toInt()
+            }
+        }
+        menuLayout.addView(divider)
+
+        val createButton = { text: String, isPrimary: Boolean, isDestructive: Boolean, onClick: () -> Unit ->
+            android.widget.TextView(this).apply {
+                this.text = text
+                setTextColor(
+                    when {
+                        isDestructive -> Color.parseColor("#E11D48") // RosePinkDeep / Ruby
+                        isPrimary -> Color.parseColor("#F43F8E")     // RosePink
+                        else -> Color.parseColor("#1E1926")          // TextPrimary
+                    }
+                )
+                textSize = 14.5f
+                typeface = android.graphics.Typeface.DEFAULT_BOLD
+                gravity = Gravity.CENTER
+
+                val btnRadius = 16 * resources.displayMetrics.density
+                background = android.graphics.drawable.GradientDrawable().apply {
+                    setColor(
+                        when {
+                            isPrimary -> Color.parseColor("#FFF5F8") // Soft Rose background
+                            isDestructive -> Color.parseColor("#FFF1F2")
+                            else -> Color.parseColor("#FDF2F8")     // Blush surface elevated
+                        }
+                    )
+                    cornerRadius = btnRadius
+                    val btnStrokePx = (1 * resources.displayMetrics.density).toInt()
+                    setStroke(
+                        btnStrokePx,
+                        when {
+                            isPrimary -> Color.parseColor("#FCE7F3")
+                            isDestructive -> Color.parseColor("#FECDD3")
+                            else -> Color.parseColor("#FCE7F3")
+                        }
+                    )
+                }
+
+                val padH = (20 * resources.displayMetrics.density).toInt()
+                val padV = (12 * resources.displayMetrics.density).toInt()
+                setPadding(padH, padV, padH, padV)
+
+                layoutParams = android.widget.LinearLayout.LayoutParams(
+                    android.widget.LinearLayout.LayoutParams.MATCH_PARENT,
+                    android.widget.LinearLayout.LayoutParams.WRAP_CONTENT
+                ).apply {
+                    bottomMargin = (8 * resources.displayMetrics.density).toInt()
+                }
+
+                setOnClickListener {
+                    onClick()
+                    dismissLongPressMenu()
+                }
+            }
+        }
+
+        menuLayout.addView(createButton("🌸 Open Soltini App", true, false) { onAvatarTapped() })
+        
+        val isSleeping = voiceService?.isSleeping?.value == true
+        menuLayout.addView(createButton(if (isSleeping) "☀️ Wake Up Voice" else "🌙 Sleep Voice", false, false) {
+            if (isSleeping) voiceService?.wakeUp() else voiceService?.sleep()
+        })
+        
+        menuLayout.addView(createButton("⚙️ Assistant Studio", false, false) { bringMainActivityToForeground("settings") })
+        menuLayout.addView(createButton("✕ Dismiss Orb", false, true) { stopSelf() })
+
+        val menuParams = FrameLayout.LayoutParams(
+            (240 * resources.displayMetrics.density).toInt(),
+            FrameLayout.LayoutParams.WRAP_CONTENT
+        ).apply {
+            gravity = Gravity.CENTER
+        }
+        
+        popupMenuContainer?.addView(menuLayout, menuParams)
+
+        val params = WindowManager.LayoutParams(
+            WindowManager.LayoutParams.MATCH_PARENT,
+            WindowManager.LayoutParams.MATCH_PARENT,
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O)
+                WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY
+            else
+                @Suppress("DEPRECATION") WindowManager.LayoutParams.TYPE_PHONE,
+            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE,
+            PixelFormat.TRANSLUCENT
+        )
+
+        try {
+            windowManager.addView(popupMenuContainer, params)
+        } catch (e: Exception) {
+            android.util.Log.e("OverlayService", "Failed to show popup menu: ${e.message}")
+        }
+    }
+
+    private fun dismissLongPressMenu() {
+        popupMenuContainer?.let {
+            try {
+                windowManager.removeView(it)
+            } catch (e: Exception) {}
+            popupMenuContainer = null
+        }
+    }
 }
+

@@ -28,6 +28,7 @@ data class TranscriptEntry(
 
 class MainViewModel(application: Application) : AndroidViewModel(application) {
 
+    val appSettings = com.soltini.app.settings.AppSettings(application)
     private var voiceService: BackgroundVoiceService? = null
 
     private val _connectionState = MutableStateFlow<ConnectionState>(ConnectionState.Disconnected)
@@ -133,6 +134,14 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         voiceService?.reconnect()
     }
 
+    /**
+     * Injects a text prompt into the live Gemini session as if the user spoke it.
+     * Called by quick-macro buttons on the VoiceScreen.
+     */
+    fun sendTextMessage(text: String) {
+        voiceService?.sendTextMessage(text)
+    }
+
     /** Toggles Pause Mode: pauses everything including accessibility, or resumes. */
     fun togglePauseMode() {
         voiceService?.togglePauseMode()
@@ -149,7 +158,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     /** Gives Settings UI access to user-configurable AI settings. */
-    fun getAppSettings() = voiceService?.appSettings
+    // getAppSettings() property getter is automatically synthesized from val appSettings
 
     /** Gives Settings UI access to the memory store (for viewer + clear button). */
     fun getMemoryManager() = voiceService?.memoryManager

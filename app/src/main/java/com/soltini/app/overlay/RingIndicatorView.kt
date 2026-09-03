@@ -14,11 +14,20 @@ import kotlin.math.min
 enum class RingState { IDLE, LISTENING, SPEAKING, THINKING, SLEEPING }
 
 class RingIndicatorView(context: Context) : View(context) {
+    companion object {
+        val COLOR_ROSE_PINK = Color.parseColor("#F43F8E")
+        val COLOR_ROSE_PINK_DEEP = Color.parseColor("#E11D48")
+        val COLOR_SOFT_BLUSH = Color.parseColor("#FB7185")
+        val COLOR_SOFT_VIOLET = Color.parseColor("#8B5CF6")
+        val COLOR_SLEEP_BLUSH = Color.parseColor("#FDA4AF")
+        val COLOR_SLEEP_PINK = Color.parseColor("#FCE7F3")
+    }
+
     private val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
         style = Paint.Style.FILL
     }
     
-    private var pulseAlpha = 0f
+    private var pulseAlpha = 0.75f
     private var pulseScale = 1f
     private var pulseAnimator: ValueAnimator? = null
     
@@ -34,17 +43,17 @@ class RingIndicatorView(context: Context) : View(context) {
             pulseAnimator?.cancel()
             when (value) {
                 RingState.IDLE -> { 
-                    colorCenter = Color.parseColor("#34D399") // Teal
-                    colorEdge = Color.parseColor("#3B82F6")   // Blue
-                    pulseAlpha = 0.6f 
+                    colorCenter = COLOR_ROSE_PINK
+                    colorEdge = COLOR_SOFT_BLUSH
+                    pulseAlpha = 0.75f 
                     invalidate() 
                 } 
                 RingState.SLEEPING -> {
-                    // Dim grey slow pulse — tap to wake
-                    colorCenter = Color.parseColor("#6B7280") // Grey
-                    colorEdge = Color.parseColor("#374151")   // Dark grey
-                    pulseAnimator = ValueAnimator.ofFloat(0.2f, 0.4f, 0.2f).apply {
-                        duration = 3000
+                    // Soft, calming luxury rose-blush breathe pulse — tap to wake
+                    colorCenter = COLOR_SLEEP_BLUSH
+                    colorEdge = COLOR_SLEEP_PINK
+                    pulseAnimator = ValueAnimator.ofFloat(0.35f, 0.65f, 0.35f).apply {
+                        duration = 3200
                         repeatCount = ValueAnimator.INFINITE
                         interpolator = LinearInterpolator()
                         addUpdateListener {
@@ -55,32 +64,32 @@ class RingIndicatorView(context: Context) : View(context) {
                         start()
                     }
                 }
-                RingState.LISTENING -> startPulse(Color.parseColor("#34D399"), Color.parseColor("#3B82F6")) // Teal/Blue
-                RingState.SPEAKING -> startPulse(Color.parseColor("#F472B6"), Color.parseColor("#8B5CF6")) // Pink/Purple
-                RingState.THINKING -> startPulse(Color.parseColor("#818CF8"), Color.parseColor("#A855F7")) // Indigo/Purple
+                RingState.LISTENING -> startPulse(COLOR_SOFT_BLUSH, COLOR_ROSE_PINK)
+                RingState.SPEAKING -> startPulse(COLOR_ROSE_PINK, COLOR_SOFT_BLUSH)
+                RingState.THINKING -> startPulse(COLOR_SOFT_VIOLET, COLOR_ROSE_PINK)
             }
         }
     
-    private var colorCenter = Color.parseColor("#34D399") // Teal
-    private var colorEdge = Color.parseColor("#3B82F6")   // Blue
+    private var colorCenter = COLOR_ROSE_PINK
+    private var colorEdge = COLOR_SOFT_BLUSH
     
     init {
-        // Default idle state looks colorful and vibrant
-        colorCenter = Color.parseColor("#34D399")
-        colorEdge = Color.parseColor("#3B82F6")
-        pulseAlpha = 0.6f
+        // Radiant Rose Pink & Soft Blush luxury default
+        colorCenter = COLOR_ROSE_PINK
+        colorEdge = COLOR_SOFT_BLUSH
+        pulseAlpha = 0.75f
     }
     
     private fun startPulse(center: Int, edge: Int) {
         colorCenter = center
         colorEdge = edge
-        pulseAnimator = ValueAnimator.ofFloat(0.6f, 1.0f, 0.6f).apply {
-            duration = 1500
+        pulseAnimator = ValueAnimator.ofFloat(0.65f, 1.0f, 0.65f).apply {
+            duration = 1400
             repeatCount = ValueAnimator.INFINITE
             interpolator = LinearInterpolator()
             addUpdateListener { 
                 pulseAlpha = it.animatedValue as Float
-                pulseScale = 1f + ((it.animatedValue as Float - 0.6f) * 0.15f) // subtle scale
+                pulseScale = 1f + ((it.animatedValue as Float - 0.65f) * 0.18f) // subtle scale
                 invalidate()
             }
             start()

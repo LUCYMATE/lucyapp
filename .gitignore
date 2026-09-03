@@ -13,6 +13,11 @@
 /captures
 .externalNativeBuild
 .cxx
-local.properties
 .env
+*.env
 debug.keystore
+
+# External Live2D library modules & dependencies (downloaded during dev/run)
+/Framework/
+/Core/
+/temp_core/

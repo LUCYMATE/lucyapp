@@ -25,3 +25,9 @@ dependencyResolutionManagement {
 rootProject.name = "Gemini Voice"
 
 include(":app")
+
+val frameworkDir = file("Framework/framework")
+if (frameworkDir.exists()) {
+    include(":framework")
+    project(":framework").projectDir = frameworkDir
+}

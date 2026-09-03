@@ -49,14 +49,6 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
-import com.soltini.app.ui.theme.AccentBlue
-import com.soltini.app.ui.theme.DarkBackground
-import com.soltini.app.ui.theme.DarkBorder
-import com.soltini.app.ui.theme.DarkSurface
-import com.soltini.app.ui.theme.DarkSurfaceVariant
-import com.soltini.app.ui.theme.RedError
-import com.soltini.app.ui.theme.TextPrimary
-import com.soltini.app.ui.theme.TextSecondary
 import com.soltini.app.util.AppLogger
 import com.soltini.app.util.LogEntry
 
@@ -79,7 +71,7 @@ fun LogScreen(
         modifier = modifier
             .fillMaxSize()
             .windowInsetsPadding(WindowInsets.safeDrawing),
-        color = DarkBackground
+        color = MaterialTheme.colorScheme.background
     ) {
         Column(
             modifier = Modifier
@@ -90,8 +82,8 @@ fun LogScreen(
             Card(
                 modifier = Modifier.fillMaxWidth(),
                 shape = RoundedCornerShape(20.dp),
-                colors = CardDefaults.cardColors(containerColor = DarkSurface),
-                border = androidx.compose.foundation.BorderStroke(1.dp, DarkBorder)
+                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+                border = androidx.compose.foundation.BorderStroke(1.dp, MaterialTheme.colorScheme.outline)
             ) {
                 Row(
                     modifier = Modifier
@@ -102,12 +94,12 @@ fun LogScreen(
                 ) {
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         IconButton(onClick = onBack) {
-                            Icon(Icons.AutoMirrored.Filled.ArrowBack, "Back", tint = TextPrimary)
+                            Icon(Icons.AutoMirrored.Filled.ArrowBack, "Back", tint = MaterialTheme.colorScheme.onBackground)
                         }
                         Spacer(modifier = Modifier.width(8.dp))
                         Column {
-                            Text("System & Network Logs", style = MaterialTheme.typography.titleMedium, color = TextPrimary, fontWeight = FontWeight.Bold)
-                            Text("${logs.size} entries recorded", style = MaterialTheme.typography.bodySmall, color = TextSecondary)
+                            Text("System & Network Logs", style = MaterialTheme.typography.titleMedium, color = MaterialTheme.colorScheme.onBackground, fontWeight = FontWeight.Bold)
+                            Text("${logs.size} entries recorded", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                         }
                     }
 
@@ -116,14 +108,14 @@ fun LogScreen(
                             val success = AppLogger.copyToClipboard(context)
                             Toast.makeText(context, if (success) "Logs copied!" else "Failed", Toast.LENGTH_SHORT).show()
                         }) {
-                            Icon(Icons.Default.ContentCopy, "Copy Logs", tint = AccentBlue)
+                            Icon(Icons.Default.ContentCopy, "Copy Logs", tint = MaterialTheme.colorScheme.primary)
                         }
 
                         IconButton(onClick = {
                             AppLogger.clear()
                             Toast.makeText(context, "Logs cleared", Toast.LENGTH_SHORT).show()
                         }) {
-                            Icon(Icons.Default.Delete, "Clear Logs", tint = RedError)
+                            Icon(Icons.Default.Delete, "Clear Logs", tint = MaterialTheme.colorScheme.error)
                         }
                     }
                 }
@@ -136,14 +128,14 @@ fun LogScreen(
                 modifier = Modifier
                     .fillMaxWidth()
                     .clip(RoundedCornerShape(12.dp))
-                    .background(DarkSurfaceVariant)
-                    .border(1.dp, DarkBorder, RoundedCornerShape(12.dp))
+                    .background(MaterialTheme.colorScheme.surfaceVariant)
+                    .border(1.dp, MaterialTheme.colorScheme.outline, RoundedCornerShape(12.dp))
                     .padding(10.dp)
             ) {
                 Text(
                     text = "💡 Tip: Text below is fully selectable! Press and hold any message to select and copy specific details or tap the Copy icon above to copy all logs.",
                     style = MaterialTheme.typography.bodySmall,
-                    color = TextSecondary,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
                     fontSize = 11.sp
                 )
             }
@@ -156,12 +148,12 @@ fun LogScreen(
                     .weight(1f)
                     .fillMaxWidth(),
                 shape = RoundedCornerShape(16.dp),
-                colors = CardDefaults.cardColors(containerColor = DarkSurface),
-                border = androidx.compose.foundation.BorderStroke(1.dp, DarkBorder)
+                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+                border = androidx.compose.foundation.BorderStroke(1.dp, MaterialTheme.colorScheme.outline)
             ) {
                 if (logs.isEmpty()) {
                     Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                        Text("No logs recorded yet.", style = MaterialTheme.typography.bodyMedium, color = TextSecondary)
+                        Text("No logs recorded yet.", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
                     }
                 } else {
                     SelectionContainer {
@@ -186,9 +178,9 @@ fun LogScreen(
 @Composable
 private fun LogItemCard(entry: LogEntry) {
     val levelColor = when (entry.level) {
-        "ERROR" -> RedError
+        "ERROR" -> MaterialTheme.colorScheme.error
         "WARN" -> Color(0xFFF59E0B) // Amber
-        "INFO" -> AccentBlue
+        "INFO" -> MaterialTheme.colorScheme.primary
         else -> Color(0xFFA1A1AA) // Zinc
     }
 
@@ -196,8 +188,8 @@ private fun LogItemCard(entry: LogEntry) {
         modifier = Modifier
             .fillMaxWidth()
             .clip(RoundedCornerShape(8.dp))
-            .background(DarkSurfaceVariant)
-            .border(0.5.dp, DarkBorder, RoundedCornerShape(8.dp))
+            .background(MaterialTheme.colorScheme.surfaceVariant)
+            .border(0.5.dp, MaterialTheme.colorScheme.outline, RoundedCornerShape(8.dp))
             .padding(8.dp)
     ) {
         Column {
@@ -216,10 +208,10 @@ private fun LogItemCard(entry: LogEntry) {
                         Text(entry.level, color = levelColor, fontSize = 10.sp, fontWeight = FontWeight.Bold)
                     }
                     Spacer(modifier = Modifier.width(8.dp))
-                    Text(entry.tag, style = MaterialTheme.typography.labelSmall, color = TextPrimary, fontWeight = FontWeight.Bold, fontSize = 11.sp)
+                    Text(entry.tag, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onBackground, fontWeight = FontWeight.Bold, fontSize = 11.sp)
                 }
 
-                Text(entry.timestamp, style = MaterialTheme.typography.labelSmall, color = TextSecondary, fontSize = 10.sp, fontFamily = FontFamily.Monospace)
+                Text(entry.timestamp, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 10.sp, fontFamily = FontFamily.Monospace)
             }
 
             Spacer(modifier = Modifier.height(4.dp))
@@ -227,7 +219,7 @@ private fun LogItemCard(entry: LogEntry) {
             Text(
                 text = entry.message,
                 style = MaterialTheme.typography.bodySmall,
-                color = TextPrimary,
+                color = MaterialTheme.colorScheme.onBackground,
                 fontSize = 11.sp,
                 fontFamily = FontFamily.Monospace,
                 lineHeight = 15.sp

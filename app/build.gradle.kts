@@ -136,4 +136,11 @@ dependencies {
   debugImplementation(libs.androidx.compose.ui.tooling)
   "ksp"(libs.androidx.room.compiler)
   "ksp"(libs.moshi.kotlin.codegen)
+
+  // Live2D official framework library (module included in dev/run mode)
+  if (findProject(":framework") != null) {
+    implementation(project(":framework"))
+  }
 }
+
+
