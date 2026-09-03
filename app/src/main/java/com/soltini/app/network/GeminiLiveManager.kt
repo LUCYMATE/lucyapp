@@ -223,14 +223,24 @@ class GeminiLiveManager(
 
             val toolDocs = """
 
-DEVICE CONTROL TOOLS (Fast Lane):
-- lock_device: Lock the screen
-- wake_device: Turn the screen on
-- sleep_agent: Go to sleep mode
+CORE TOOLS (Fast Lane - Call Immediately):
+- see_screen: Dual-track screen perception (accessibility wireframe + visual screenshot). ALWAYS call when the user asks "what is on my screen?", "read my screen", "look at this", "can you see this?", "describe my screen", or to inspect UI before clicking. NEVER say you cannot see the screen or cannot take a screenshot!
+- read_screen: Read all UI text, buttons, and layout hierarchy currently on screen.
+- take_screenshot: Capture a visual screenshot of the current screen.
+- click_element: Click or tap a button, link, or item on screen by its text or label.
+- make_phone_call: Place a direct standard cellular/SIM phone call to a contact name or phone number. ALWAYS use this when the user says "call [person/number]", "make a phone call", or "dial [number]".
+- open_app: Launch an installed app by name (e.g. "YouTube", "Settings", "WhatsApp", "Spotify", "Camera").
+- type_text: Type text into the active text field.
+- lock_device: Lock the screen.
+- wake_device: Turn the screen on.
+- sleep_agent: Put Soltini to sleep.
+
+CALLING RULES:
+- When the user asks to "call [name]" or "call [number]": ALWAYS call `make_phone_call` (Cellular SIM call).
+- ONLY call `whatsapp_call` if the user explicitly says "WhatsApp" or "call on WhatsApp".
 
 BACKGROUND AUTOMATION:
-For ALL complex actions (opening apps, sending messages, typing, clicking, scrolling, searching YouTube, making calls), you MUST delegate to the background agent using `trigger_automation`.
-- trigger_automation: use for opening apps (e.g. "open spotify"), web search, sending messages, playing videos, etc. Do NOT claim the task is finished when invoking this tool; inform the user you are working on it (e.g. "I'm on it!"), and wait for the background agent to complete it.
+For multi-step autonomous browsing or complex background scripts, use `trigger_automation`.
 
 SECURITY & IDENTITY INSTRUCTIONS:
 - You are developed by Satish Acharya. His website is www.satish.com.np.
@@ -264,7 +274,84 @@ SECURITY & IDENTITY INSTRUCTIONS:
                         put(JSONObject().apply {
                             put("functionDeclarations", JSONArray().apply {
 
-                                // ─── Fast Lane Tools ─────────────────────────
+                                // ─── Screen Perception & Vision (Fast Lane) ──
+                                
+                                // see_screen
+                                put(JSONObject().apply {
+                                    put("name", "see_screen")
+                                    put("description", "Perceives, reads, and visually inspects everything currently displayed on the user's screen using dual-mode accessibility wireframe and visual screenshot. Call whenever the user asks 'what is on my screen', 'read my screen', 'can you see this', 'describe what you see', or to locate buttons to click.")
+                                    put("parameters", JSONObject().apply {
+                                        put("type", "OBJECT")
+                                        put("properties", JSONObject().apply {
+                                            put("screenshot", JSONObject().apply {
+                                                put("type", "BOOLEAN")
+                                                put("description", "Whether to include high-resolution visual screenshot along with UI wireframe. Defaults to true.")
+                                            })
+                                        })
+                                    })
+                                })
+
+                                // read_screen
+                                put(JSONObject().apply {
+                                    put("name", "read_screen")
+                                    put("description", "Reads all visible UI text, buttons, and layout hierarchy currently displayed on the screen.")
+                                    put("parameters", JSONObject().apply { put("type", "OBJECT"); put("properties", JSONObject()) })
+                                })
+
+                                // take_screenshot
+                                put(JSONObject().apply {
+                                    put("name", "take_screenshot")
+                                    put("description", "Captures a screenshot of the user's screen.")
+                                    put("parameters", JSONObject().apply { put("type", "OBJECT"); put("properties", JSONObject()) })
+                                })
+
+                                // click_element
+                                put(JSONObject().apply {
+                                    put("name", "click_element")
+                                    put("description", "Clicks or taps an on-screen button, link, or text element by its visible label.")
+                                    put("parameters", JSONObject().apply {
+                                        put("type", "OBJECT")
+                                        put("properties", JSONObject().apply {
+                                            put("text", JSONObject().apply {
+                                                put("type", "STRING")
+                                                put("description", "The visible text or description of the element to click.")
+                                            })
+                                        })
+                                        put("required", JSONArray().apply { put("text") })
+                                    })
+                                })
+
+                                // open_app
+                                put(JSONObject().apply {
+                                    put("name", "open_app")
+                                    put("description", "Opens an installed Android app by its name (e.g. 'YouTube', 'Settings', 'WhatsApp', 'Camera').")
+                                    put("parameters", JSONObject().apply {
+                                        put("type", "OBJECT")
+                                        put("properties", JSONObject().apply {
+                                            put("app_name", JSONObject().apply {
+                                                put("type", "STRING")
+                                                put("description", "Name of the app to launch")
+                                            })
+                                        })
+                                        put("required", JSONArray().apply { put("app_name") })
+                                    })
+                                })
+
+                                // make_phone_call
+                                put(JSONObject().apply {
+                                    put("name", "make_phone_call")
+                                    put("description", "Places a standard cellular/SIM phone call to a contact name or phone number. ALWAYS use this when the user says 'call [someone]' or 'phone [someone]', UNLESS they specifically asked for WhatsApp.")
+                                    put("parameters", JSONObject().apply {
+                                        put("type", "OBJECT")
+                                        put("properties", JSONObject().apply {
+                                            put("phone_number", JSONObject().apply {
+                                                put("type", "STRING")
+                                                put("description", "Contact name or phone number to call via cellular SIM card.")
+                                            })
+                                        })
+                                        put("required", JSONArray().apply { put("phone_number") })
+                                    })
+                                })
 
                                 // lock_device
                                 put(JSONObject().apply {

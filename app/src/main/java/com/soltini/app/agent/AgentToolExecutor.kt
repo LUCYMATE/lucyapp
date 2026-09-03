@@ -5,6 +5,8 @@ import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.net.Uri
+import android.graphics.Bitmap
+import android.os.Build
 import android.os.PowerManager
 import android.telephony.SmsManager
 import android.util.Log
@@ -13,7 +15,11 @@ import com.soltini.app.core.ReminderReceiver
 import com.soltini.app.services.ScreenCaptureManager
 import com.soltini.app.termux.TermuxResultReceiver
 import com.soltini.app.ui.UnlockActivity
+import com.soltini.app.util.AppLogger
 import kotlinx.coroutines.runBlocking
+import java.io.ByteArrayOutputStream
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
 import org.json.JSONArray
 import org.json.JSONObject
 import android.hardware.camera2.CameraManager
@@ -64,10 +70,12 @@ class AgentToolExecutor(private val context: Context) {
             "press_home"          -> accessibilityAction { it.pressHome() } success "Home pressed"
             "press_recents"       -> accessibilityAction { it.pressRecents() } success "Recents opened"
 
-            // ── Screen Automation & Perception ────────────────────────────
-            "read_screen"         -> readScreen()
+            // ── Screen Automation & Perception (Dual-Track Vision & Wireframe) ────
+            "see_screen"          -> seeScreen(includeScreenshot = args.optBoolean("screenshot", true))
+            "read_screen"         -> seeScreen(includeScreenshot = args.optBoolean("screenshot", false))
             "read_compact_screen" -> readCompactScreen(args.optInt("max_nodes", 400))
-            "take_screenshot_vision" -> takeScreenshotVision()
+            "take_screenshot"     -> seeScreen(includeScreenshot = true)
+            "take_screenshot_vision" -> seeScreen(includeScreenshot = true)
             "click_element"       -> clickElement(args.optString("text", ""))
             "tap_screen"          -> tapScreen(
                 x = args.optDouble("x", -1.0).toFloat(),
@@ -91,7 +99,9 @@ class AgentToolExecutor(private val context: Context) {
                 key = args.optString("notification_key", ""),
                 message = args.optString("message", "")
             )
-            "make_phone_call"      -> makePhoneCall(args.optString("phone_number", ""))
+            "make_phone_call"      -> makePhoneCall(
+                args.optString("phone_number").ifBlank { args.optString("contact_name", "") }
+            )
             "send_sms"             -> sendSms(args.optString("phone_number", ""), args.optString("message", ""))
 
             // ── Declarative Macros & Automation ───────────────────────────
@@ -203,16 +213,56 @@ class AgentToolExecutor(private val context: Context) {
         }
     }
 
-    // ─── Screen Automation & Vision ───────────────────────────────────────────
+    // ─── Screen Automation & Vision (Dual-Track Perception Engine) ───────────
 
-    private fun readScreen(): JSONObject {
+    private fun seeScreen(includeScreenshot: Boolean = true): JSONObject {
         val svc = SoltiniAccessibilityService.getInstance()
-            ?: return error("Accessibility Service not active")
-        val text = svc.readScreen()
+        val wireframe = svc?.readScreen() ?: "Accessibility Service not active"
+
+        var screenshotBase64: String? = null
+        if (includeScreenshot) {
+            // 1. Direct AccessibilityService screenshot (Android 11+, zero popups, instant)
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R && svc != null) {
+                val latch = CountDownLatch(1)
+                var capturedBitmap: Bitmap? = null
+                try {
+                    svc.takeScreenshotDirectly { bmp ->
+                        capturedBitmap = bmp
+                        latch.countDown()
+                    }
+                    latch.await(1500, TimeUnit.MILLISECONDS)
+                    if (capturedBitmap != null) {
+                        screenshotBase64 = bitmapToBase64Jpeg(capturedBitmap!!)
+                    }
+                } catch (e: Exception) {
+                    AppLogger.w(TAG, "Direct a11y screenshot failed: ${e.message}")
+                }
+            }
+
+            // 2. Fallback to ScreenCaptureManager if needed
+            if (screenshotBase64 == null) {
+                screenshotBase64 = runBlocking {
+                    ScreenCaptureManager.captureScreenshotBase64(context, quality = 75)
+                }
+            }
+        }
+
         return JSONObject().apply {
             put("status", "ok")
-            put("screen_content", text)
+            put("screen_wireframe", wireframe)
+            put("screen_content", wireframe) // compatibility alias
+            if (screenshotBase64 != null) {
+                put("image_base64", screenshotBase64)
+                put("format", "image/jpeg")
+            }
         }
+    }
+
+    private fun bitmapToBase64Jpeg(bitmap: Bitmap, quality: Int = 75): String {
+        val stream = ByteArrayOutputStream()
+        bitmap.compress(Bitmap.CompressFormat.JPEG, quality, stream)
+        val bytes = stream.toByteArray()
+        return android.util.Base64.encodeToString(bytes, android.util.Base64.NO_WRAP)
     }
 
     private fun readCompactScreen(maxNodes: Int): JSONObject {
@@ -222,21 +272,6 @@ class AgentToolExecutor(private val context: Context) {
         return JSONObject().apply {
             put("status", "ok")
             put("compact_screen", compactState)
-        }
-    }
-
-    private fun takeScreenshotVision(): JSONObject {
-        val base64Jpeg = runBlocking {
-            ScreenCaptureManager.captureScreenshotBase64(context, quality = 75)
-        }
-        return if (base64Jpeg != null) {
-            JSONObject().apply {
-                put("status", "ok")
-                put("image_base64", base64Jpeg)
-                put("format", "image/jpeg")
-            }
-        } else {
-            error("Failed to capture screen image. Ensure MediaProjection permission is granted.")
         }
     }
 
@@ -323,21 +358,36 @@ class AgentToolExecutor(private val context: Context) {
     }
 
     @SuppressLint("MissingPermission")
-    private fun makePhoneCall(number: String): JSONObject {
-        if (number.isBlank()) return error("phone_number is required")
+    private fun makePhoneCall(target: String): JSONObject {
+        if (target.isBlank()) return error("phone_number or contact_name is required")
+        var numberToCall = target.trim()
+
+        // If target contains letters (e.g. "Mom", "Dad", "John"), resolve contact name via phonebook
+        if (target.any { it.isLetter() }) {
+            val contactsResult = readContacts(target)
+            val contactsArr = contactsResult.optJSONArray("contacts")
+            if (contactsArr != null && contactsArr.length() > 0) {
+                val firstMatch = contactsArr.getJSONObject(0)
+                numberToCall = firstMatch.optString("number", target)
+                AppLogger.i(TAG, "Resolved contact '$target' to phone number: $numberToCall")
+            } else {
+                AppLogger.w(TAG, "No contact match found for '$target', attempting to dial query directly")
+            }
+        }
+
         return try {
-            val intent = Intent(Intent.ACTION_CALL, Uri.parse("tel:${Uri.encode(number)}")).apply {
+            val intent = Intent(Intent.ACTION_CALL, Uri.parse("tel:${Uri.encode(numberToCall)}")).apply {
                 flags = Intent.FLAG_ACTIVITY_NEW_TASK
             }
             context.startActivity(intent)
-            result("status", "calling", "number", number)
+            result("status", "calling", "number", numberToCall, "target", target)
         } catch (e: Exception) {
             try {
-                val dialIntent = Intent(Intent.ACTION_DIAL, Uri.parse("tel:${Uri.encode(number)}")).apply {
+                val dialIntent = Intent(Intent.ACTION_DIAL, Uri.parse("tel:${Uri.encode(numberToCall)}")).apply {
                     flags = Intent.FLAG_ACTIVITY_NEW_TASK
                 }
                 context.startActivity(dialIntent)
-                result("status", "dialer_opened", "number", number)
+                result("status", "dialer_opened", "number", numberToCall, "target", target)
             } catch (ex: Exception) {
                 error("Failed to make phone call: ${ex.message}")
             }

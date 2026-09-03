@@ -7,6 +7,7 @@ import android.app.PendingIntent
 import android.app.Service
 import android.content.Context
 import android.content.Intent
+import android.media.AudioDeviceInfo
 import android.media.AudioFormat
 import android.media.AudioManager
 import android.media.MediaPlayer
@@ -85,7 +86,7 @@ class BackgroundVoiceService : Service(), GeminiLiveListener, ToolCallListener {
      */
     private val activeToolCallCount = AtomicInteger(0)
 
-    private val audioPlayer = AudioPlayer()
+    private val audioPlayer by lazy { AudioPlayer(this) }
     private lateinit var audioRecorder: AudioRecorder
     private lateinit var geminiLiveManager: GeminiLiveManager
     private lateinit var agentToolExecutor: AgentToolExecutor
@@ -233,6 +234,7 @@ class BackgroundVoiceService : Service(), GeminiLiveListener, ToolCallListener {
             vadThreshold = appSettings.vadThreshold
             micGain = appSettings.micGain
             isScreenRecordingModeEnabled = appSettings.isScreenRecordingModeEnabled
+            audioSourcePreference = appSettings.audioSource
         }
 
 
@@ -257,13 +259,26 @@ class BackgroundVoiceService : Service(), GeminiLiveListener, ToolCallListener {
             connectionState.collect { state ->
                 when (state) {
                     ConnectionState.Live -> {
-                        if (appSettings.isScreenRecordingModeEnabled) {
-                            try {
-                                val am = getSystemService(Context.AUDIO_SERVICE) as AudioManager
-                                am.mode = AudioManager.MODE_IN_COMMUNICATION
-                            } catch (e: Exception) {
-                                Log.w(TAG, "Failed to set MODE_IN_COMMUNICATION: ${e.message}")
+                        try {
+                            val am = getSystemService(Context.AUDIO_SERVICE) as AudioManager
+                            // Force sound output to the loud bottom media speaker, NOT the phone call earpiece
+                            am.isSpeakerphoneOn = true
+                            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                                val speakerDevice = am.availableCommunicationDevices.firstOrNull {
+                                    it.type == AudioDeviceInfo.TYPE_BUILTIN_SPEAKER
+                                }
+                                if (speakerDevice != null) {
+                                    am.setCommunicationDevice(speakerDevice)
+                                    Log.i(TAG, "Enforced communication device to TYPE_BUILTIN_SPEAKER")
+                                }
                             }
+                            if (appSettings.isScreenRecordingModeEnabled) {
+                                am.mode = AudioManager.MODE_IN_COMMUNICATION
+                            } else {
+                                am.mode = AudioManager.MODE_NORMAL
+                            }
+                        } catch (e: Exception) {
+                            Log.w(TAG, "Failed to configure speaker routing: ${e.message}")
                         }
 
                         lastSpeechTimestamp = System.currentTimeMillis()
@@ -277,8 +292,12 @@ class BackgroundVoiceService : Service(), GeminiLiveListener, ToolCallListener {
                         try {
                             val am = getSystemService(Context.AUDIO_SERVICE) as AudioManager
                             am.mode = AudioManager.MODE_NORMAL
+                            am.isSpeakerphoneOn = false
+                            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                                am.clearCommunicationDevice()
+                            }
                         } catch (e: Exception) {
-                            Log.w(TAG, "Failed to restore MODE_NORMAL: ${e.message}")
+                            Log.w(TAG, "Failed to restore audio routing: ${e.message}")
                         }
 
                         audioRecorder.stopRecording()

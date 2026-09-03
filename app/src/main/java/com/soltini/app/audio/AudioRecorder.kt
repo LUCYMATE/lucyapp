@@ -44,6 +44,7 @@ class AudioRecorder(
     var micGain: Float = 1.5f
     var isModelSpeaking: Boolean = false
     var isScreenRecordingModeEnabled: Boolean = false
+    var audioSourcePreference: String = "MIC"
 
     // Auto-calibrating ambient noise floor
     private var ambientNoiseFloor: Float = 0.005f
@@ -64,8 +65,19 @@ class AudioRecorder(
         val bufferSize = maxOf(minBufferSize, SAMPLE_RATE * 2 / 10) // ~200ms chunk buffer
 
         try {
+            val primarySource = if (audioSourcePreference.equals("VOICE_COMMUNICATION", ignoreCase = true)) {
+                MediaRecorder.AudioSource.VOICE_COMMUNICATION
+            } else {
+                MediaRecorder.AudioSource.MIC
+            }
+            val fallbackSource = if (primarySource == MediaRecorder.AudioSource.VOICE_COMMUNICATION) {
+                MediaRecorder.AudioSource.MIC
+            } else {
+                MediaRecorder.AudioSource.VOICE_COMMUNICATION
+            }
+
             audioRecord = AudioRecord(
-                MediaRecorder.AudioSource.VOICE_COMMUNICATION,
+                primarySource,
                 SAMPLE_RATE,
                 CHANNEL_CONFIG,
                 AUDIO_FORMAT,
@@ -73,9 +85,9 @@ class AudioRecorder(
             )
 
             if (audioRecord?.state != AudioRecord.STATE_INITIALIZED) {
-                AppLogger.w(TAG, "VOICE_COMMUNICATION failed, falling back to MIC source")
+                AppLogger.w(TAG, "AudioSource $primarySource failed, falling back to $fallbackSource")
                 audioRecord = AudioRecord(
-                    MediaRecorder.AudioSource.MIC,
+                    fallbackSource,
                     SAMPLE_RATE,
                     CHANNEL_CONFIG,
                     AUDIO_FORMAT,

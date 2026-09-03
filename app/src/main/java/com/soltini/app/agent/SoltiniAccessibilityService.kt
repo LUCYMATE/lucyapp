@@ -3,11 +3,13 @@ package com.soltini.app.agent
 import android.accessibilityservice.AccessibilityService
 import android.accessibilityservice.GestureDescription
 import android.annotation.SuppressLint
+import android.graphics.Bitmap
 import android.graphics.Path
 import android.graphics.Rect
 import android.os.Build
 import android.os.Bundle
 import android.util.Log
+import android.view.Display
 import android.view.accessibility.AccessibilityEvent
 import android.view.accessibility.AccessibilityNodeInfo
 import android.view.accessibility.AccessibilityWindowInfo
@@ -237,14 +239,79 @@ class SoltiniAccessibilityService : AccessibilityService() {
      * @return A plain-text representation of the screen content suitable for
      *         sending to Gemini as a tool response.
      */
+    // ─── Screen Screenshot (Android 11+) ─────────────────────────────────────
+
+    /**
+     * Captures a screenshot directly via AccessibilityService on Android 11+ (API 30+)
+     * without needing MediaProjection or user permission dialogs.
+     */
+    fun takeScreenshotDirectly(callback: (Bitmap?) -> Unit) {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            try {
+                takeScreenshot(
+                    Display.DEFAULT_DISPLAY,
+                    mainExecutor,
+                    object : TakeScreenshotCallback {
+                        override fun onSuccess(screenshot: ScreenshotResult) {
+                            try {
+                                val hardwareBuffer = screenshot.hardwareBuffer
+                                val colorSpace = screenshot.colorSpace
+                                val bitmap = Bitmap.wrapHardwareBuffer(hardwareBuffer, colorSpace)
+                                hardwareBuffer.close()
+                                val softwareBitmap = bitmap?.copy(Bitmap.Config.ARGB_8888, false)
+                                callback(softwareBitmap ?: bitmap)
+                            } catch (e: Exception) {
+                                Log.e(TAG, "Failed to decode hardware screenshot: ${e.message}")
+                                callback(null)
+                            }
+                        }
+
+                        override fun onFailure(errorCode: Int) {
+                            Log.w(TAG, "takeScreenshot failed with errorCode=$errorCode")
+                            callback(null)
+                        }
+                    }
+                )
+            } catch (e: Exception) {
+                Log.e(TAG, "takeScreenshot exception: ${e.message}")
+                callback(null)
+            }
+        } else {
+            callback(null)
+        }
+    }
+
+    // ─── Screen Reading ───────────────────────────────────────────────────────
+
+    /**
+     * Walks the full accessibility tree of all visible windows and collects
+     * all visible text into a structured string.
+     *
+     * Clickable elements include their on-screen center coordinates in the format
+     * @(cx,cy) so Gemini can pass those exact values to tap_screen().
+     *
+     * @return A plain-text representation of the screen content suitable for
+     *         sending to Gemini as a tool response.
+     */
     fun readScreen(): String {
         val sb = StringBuilder()
         try {
-            val windows: List<AccessibilityWindowInfo> = windows ?: emptyList()
-            for (window in windows) {
-                val root = window.root ?: continue
-                collectNodeText(root, sb, depth = 0)
-                root.recycle()
+            val windowList: List<AccessibilityWindowInfo> = windows ?: emptyList()
+            if (windowList.isNotEmpty()) {
+                for (window in windowList) {
+                    val root = window.root ?: continue
+                    collectNodeText(root, sb, depth = 0)
+                    root.recycle()
+                }
+            }
+
+            // Fallback: If windows was empty or yielded no content, read active root window directly
+            if (sb.isEmpty()) {
+                val activeRoot = rootInActiveWindow
+                if (activeRoot != null) {
+                    collectNodeText(activeRoot, sb, depth = 0)
+                    activeRoot.recycle()
+                }
             }
         } catch (e: Exception) {
             Log.e(TAG, "readScreen failed: ${e.message}")
@@ -262,12 +329,22 @@ class SoltiniAccessibilityService : AccessibilityService() {
         val sb = StringBuilder()
         var nodeCount = 0
         try {
-            val windows: List<AccessibilityWindowInfo> = windows ?: emptyList()
-            for (window in windows) {
-                val root = window.root ?: continue
-                nodeCount = collectCompactNodeText(root, sb, nodeCount, maxNodes)
-                root.recycle()
-                if (nodeCount >= maxNodes) break
+            val windowList: List<AccessibilityWindowInfo> = windows ?: emptyList()
+            if (windowList.isNotEmpty()) {
+                for (window in windowList) {
+                    val root = window.root ?: continue
+                    nodeCount = collectCompactNodeText(root, sb, nodeCount, maxNodes)
+                    root.recycle()
+                    if (nodeCount >= maxNodes) break
+                }
+            }
+
+            if (nodeCount == 0) {
+                val activeRoot = rootInActiveWindow
+                if (activeRoot != null) {
+                    collectCompactNodeText(activeRoot, sb, 0, maxNodes)
+                    activeRoot.recycle()
+                }
             }
         } catch (e: Exception) {
             Log.e(TAG, "dumpCompactScreenState failed: ${e.message}")
@@ -345,10 +422,6 @@ class SoltiniAccessibilityService : AccessibilityService() {
         }
 
         if (displayed != null) {
-            // Get the real screen-absolute bounding box for this node.
-            // getBoundsInScreen() returns coordinates in the same space that
-            // dispatchGesture() expects: (0,0) = physical top-left of display,
-            // including the status bar. This is exactly what tap_screen needs.
             val bounds = Rect()
             node.getBoundsInScreen(bounds)
             val cx = bounds.centerX()
@@ -375,20 +448,69 @@ class SoltiniAccessibilityService : AccessibilityService() {
     fun clickByText(query: String): Boolean {
         if (query.isBlank()) return false
         val q = query.lowercase().trim()
-        val windows: List<AccessibilityWindowInfo> = windows ?: return false
 
-        for (window in windows) {
+        // 1. Try search across all windows
+        val windowList: List<AccessibilityWindowInfo> = windows ?: emptyList()
+        for (window in windowList) {
             val root = window.root ?: continue
-            val match = findNodeByQuery(root, q, requireClickable = true)
+            val match = findNodeByQuery(root, q, requireClickable = false)
             root.recycle()
             if (match != null) {
-                val success = match.performAction(AccessibilityNodeInfo.ACTION_CLICK)
+                val clicked = performClickOrTap(match)
                 match.recycle()
-                Log.i(TAG, "clickByText('$query') -> success=$success")
-                return success
+                if (clicked) {
+                    Log.i(TAG, "clickByText('$query') -> succeeded in window")
+                    return true
+                }
             }
         }
-        Log.w(TAG, "clickByText('$query') -> no matching node found")
+
+        // 2. Fallback: Search in active root window
+        val activeRoot = rootInActiveWindow
+        if (activeRoot != null) {
+            val match = findNodeByQuery(activeRoot, q, requireClickable = false)
+            activeRoot.recycle()
+            if (match != null) {
+                val clicked = performClickOrTap(match)
+                match.recycle()
+                if (clicked) {
+                    Log.i(TAG, "clickByText('$query') -> succeeded in rootInActiveWindow")
+                    return true
+                }
+            }
+        }
+
+        Log.w(TAG, "clickByText('$query') -> no matching element found on screen")
+        return false
+    }
+
+    private fun performClickOrTap(node: AccessibilityNodeInfo): Boolean {
+        // A. Direct accessibility click on node
+        if (node.isClickable && node.performAction(AccessibilityNodeInfo.ACTION_CLICK)) {
+            return true
+        }
+
+        // B. Check clickable ancestors (e.g. Button or CardView wrapping a TextView)
+        var parent = node.parent
+        while (parent != null) {
+            if (parent.isClickable && parent.performAction(AccessibilityNodeInfo.ACTION_CLICK)) {
+                parent.recycle()
+                return true
+            }
+            val nextParent = parent.parent
+            parent.recycle()
+            parent = nextParent
+        }
+
+        // C. Physical coordinate tap at node center (guaranteed for Jetpack Compose, Flutter, React Native, WebViews)
+        val bounds = Rect()
+        node.getBoundsInScreen(bounds)
+        if (bounds.width() > 0 && bounds.height() > 0) {
+            val cx = bounds.centerX().toFloat()
+            val cy = bounds.centerY().toFloat()
+            Log.i(TAG, "performClickOrTap falling back to physical tap at ($cx, $cy) for bounds: $bounds")
+            return tapAt(cx, cy)
+        }
         return false
     }
 

@@ -1,8 +1,12 @@
 package com.soltini.app.audio
 
+import android.content.Context
 import android.media.AudioAttributes
+import android.media.AudioDeviceInfo
 import android.media.AudioFormat
+import android.media.AudioManager
 import android.media.AudioTrack
+import android.os.Build
 import com.soltini.app.util.AppLogger
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -17,7 +21,7 @@ import kotlin.math.abs
 /**
  * Handles playing raw 24kHz 16-bit mono PCM audio chunks received from Gemini Live API.
  */
-class AudioPlayer {
+class AudioPlayer(private val context: Context? = null) {
 
     companion object {
         private const val TAG = "AudioPlayer"
@@ -62,8 +66,23 @@ class AudioPlayer {
                         .build()
                 )
                 .setBufferSizeInBytes(bufferSize)
-                .setTransferMode(AudioTrack.MODE_STREAM)
                 .build()
+
+            // Ensure sound comes from the loud bottom media speaker, NOT the earpiece
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M && context != null) {
+                try {
+                    val am = context.getSystemService(Context.AUDIO_SERVICE) as? AudioManager
+                    val speakerDevice = am?.getDevices(AudioManager.GET_DEVICES_OUTPUTS)?.firstOrNull {
+                        it.type == AudioDeviceInfo.TYPE_BUILTIN_SPEAKER
+                    }
+                    if (speakerDevice != null) {
+                        audioTrack?.preferredDevice = speakerDevice
+                        AppLogger.i(TAG, "AudioTrack preferred device set to TYPE_BUILTIN_SPEAKER")
+                    }
+                } catch (e: Exception) {
+                    AppLogger.w(TAG, "Failed to set AudioTrack preferred device: ${e.message}")
+                }
+            }
 
             audioTrack?.play()
             isPlaying = true

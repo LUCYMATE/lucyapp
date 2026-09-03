@@ -64,12 +64,18 @@ Your job is to execute the user's requested phone automation task cleanly and sw
 "$requestText"
 
 ## EXECUTION RULES:
-1. **Direct Execution**: Output tool calls immediately. If asked to open an app or search on YouTube, call the respective tool in your very first turn.
-2. **Multi-Step Tasks**:
-   - For WhatsApp: call `whatsapp_send_message` or `open_app("WhatsApp")` -> `type_text` -> `click_element`.
+1. **Direct Execution**: Output tool calls immediately. If asked to make a call, open an app, or search on YouTube, call the respective tool in your very first turn.
+2. **Phone Calls**:
+   - For regular calls ("call Dad", "call John", "dial [number]", "make a phone call"): ALWAYS call `make_phone_call` (Cellular SIM phone call).
+   - ONLY call `whatsapp_call` if the user explicitly requested "WhatsApp" or "call on WhatsApp".
+3. **Screen Perception & UI Automation**:
+   - Inspect the screen using `see_screen` (which returns both the structured accessibility wireframe and visual screenshot).
+   - Click exact target elements using `click_element(text="...")` or tap coordinates with `tap_screen(x=..., y=...)`.
+   - Type text using `type_text(text="...")`.
+4. **Multi-Step Tasks**:
+   - For WhatsApp: call `whatsapp_send_message` or `whatsapp_call`.
    - For YouTube: call `youtube_search`, `youtube_open_video`, `youtube_play_pause`, etc.
-   - For UI interaction: read screen if necessary with `read_screen`, click with `click_element`, tap with `tap_screen`, or swipe with `swipe_screen`.
-3. **Completion**: When the entire task is finished, return a brief, friendly 1-2 sentence summary of what was done. Do NOT call any more tools once finished."""
+5. **Completion**: When the entire task is finished, return a brief, friendly 1-2 sentence summary of what was done. Do NOT call any more tools once finished."""
 
         val contents = JSONArray().apply {
             put(JSONObject().apply {
@@ -224,8 +230,13 @@ Your job is to execute the user's requested phone automation task cleanly and sw
         put(funcDecl("press_home", "Simulate the Android Home button", emptyObjProps()))
         put(funcDecl("press_recents", "Open Android Recent Apps overview", emptyObjProps()))
 
-        // Screen Automation & Accessibility
-        put(funcDecl("read_screen", "Reads all visible UI text and buttons currently displayed on the phone screen", emptyObjProps()))
+        // Screen Automation & Dual-Track Perception
+        put(funcDecl("see_screen", "Perceive the screen using both accessibility UI wireframe and visual screenshot",
+            objProps("screenshot" to boolProp("Include visual screenshot. Defaults to true.")),
+            emptyList()
+        ))
+        put(funcDecl("read_screen", "Reads all visible UI text, buttons, and layout hierarchy currently displayed on the phone screen", emptyObjProps()))
+        put(funcDecl("take_screenshot", "Captures a visual screenshot of the current screen", emptyObjProps()))
         put(funcDecl("click_element", "Click any UI element or button matching the given text",
             objProps("text" to strProp("Exact or partial text of the button or item to click")),
             listOf("text")
@@ -278,6 +289,16 @@ Your job is to execute the user's requested phone automation task cleanly and sw
         put(funcDecl("youtube_captions", "Toggle captions in YouTube", emptyObjProps()))
         put(funcDecl("youtube_mute", "Toggle mute in YouTube", emptyObjProps()))
         put(funcDecl("read_youtube_screen", "Read YouTube UI state and visible video titles", emptyObjProps()))
+
+        // Phone & Communications (Cellular SIM)
+        put(funcDecl("make_phone_call", "Place a standard cellular/SIM phone call to a contact name or phone number",
+            objProps("phone_number" to strProp("Contact name or phone number to call via SIM card")),
+            listOf("phone_number")
+        ))
+        put(funcDecl("read_contacts", "Search phone contacts by name to find phone numbers",
+            objProps("query" to strProp("Contact name to search")),
+            listOf("query")
+        ))
 
         // WhatsApp Automation
         put(funcDecl("whatsapp_send_message", "Open WhatsApp, search contact, type and send message",
