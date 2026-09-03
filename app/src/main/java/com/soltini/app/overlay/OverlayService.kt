@@ -43,6 +43,7 @@ class DraggableFrameLayout(context: Context) : FrameLayout(context) {
     var onDrag: ((dx: Float, dy: Float) -> Unit)? = null
     var onDragEnd: (() -> Unit)? = null
     var onTap: (() -> Unit)? = null
+    var onDoubleTap: (() -> Unit)? = null
     var onLongPress: (() -> Unit)? = null
 
     private var initialDownX = 0f
@@ -50,8 +51,10 @@ class DraggableFrameLayout(context: Context) : FrameLayout(context) {
     private var lastX = 0f
     private var lastY = 0f
     private var isDragging = false
+    private var lastTapTime = 0L
     private val slop = ViewConfiguration.get(context).scaledTouchSlop
     private val longPressTimeout = ViewConfiguration.getLongPressTimeout().toLong()
+    private val doubleTapTimeout = ViewConfiguration.getDoubleTapTimeout().toLong()
     private val handler = Handler(Looper.getMainLooper())
 
     private val longPressRunnable = Runnable {
@@ -121,10 +124,18 @@ class DraggableFrameLayout(context: Context) : FrameLayout(context) {
                 val isClick = !isDragging && (totalDx <= slop && totalDy <= slop)
 
                 if (isClick) {
-                    android.util.Log.d("DraggableFrameLayout", "Touch gesture identified as CLICK (totalDx=$totalDx, totalDy=$totalDy)")
-                    onTap?.invoke()
+                    val now = System.currentTimeMillis()
+                    if (now - lastTapTime < doubleTapTimeout) {
+                        lastTapTime = 0L
+                        android.util.Log.d("DraggableFrameLayout", "Touch gesture: DOUBLE TAP")
+                        onDoubleTap?.invoke()
+                    } else {
+                        lastTapTime = now
+                        android.util.Log.d("DraggableFrameLayout", "Touch gesture: SINGLE TAP")
+                        onTap?.invoke()
+                    }
                 } else {
-                    android.util.Log.d("DraggableFrameLayout", "Touch gesture identified as DRAG (totalDx=$totalDx, totalDy=$totalDy)")
+                    android.util.Log.d("DraggableFrameLayout", "Touch gesture: DRAG END")
                     onDragEnd?.invoke()
                 }
                 isDragging = false
@@ -355,8 +366,9 @@ class OverlayService : Service() {
         overlayView.addView(errorTextView, errorParams)
 
         // ── Window layout params ──────────────────────────────────────────────
-        val widthPx  = (120 * resources.displayMetrics.density).toInt()
-        val heightPx = (120 * resources.displayMetrics.density).toInt()
+        // Compact 64dp orb: small, elegant, side-docked, never interferes with navigation bar or keyboard
+        val widthPx  = (64 * resources.displayMetrics.density).toInt()
+        val heightPx = (64 * resources.displayMetrics.density).toInt()
 
         layoutParams = WindowManager.LayoutParams(
             widthPx, heightPx,
@@ -372,15 +384,17 @@ class OverlayService : Service() {
             PixelFormat.TRANSLUCENT
         ).apply {
             val screenWidth = resources.displayMetrics.widthPixels
-            gravity = Gravity.BOTTOM or Gravity.START
-            x = (screenWidth / 2) - (widthPx / 2)
-            y = (60 * resources.displayMetrics.density).toInt() // margin from bottom
+            val screenHeight = resources.displayMetrics.heightPixels
+            gravity = Gravity.TOP or Gravity.START
+            // Docked comfortably to upper-right side edge, safe from bottom navigation bar
+            x = screenWidth - widthPx - (12 * resources.displayMetrics.density).toInt()
+            y = (screenHeight * 0.35f).toInt()
         }
 
         // ── Drag callbacks ────────────────────────────────────────────────────
         overlayView.onDrag = { dx, dy ->
             layoutParams.x = (layoutParams.x + dx).toInt()
-            layoutParams.y = (layoutParams.y - dy).toInt() // Inverted because y is from BOTTOM
+            layoutParams.y = (layoutParams.y + dy).toInt()
             try {
                 windowManager.updateViewLayout(overlayView, layoutParams)
             } catch (e: Exception) {
@@ -389,11 +403,26 @@ class OverlayService : Service() {
         }
 
         overlayView.onDragEnd = {
-            // Do nothing, let the user place it anywhere they want (even middle of screen)
+            // Snap smoothly to nearest screen edge (left or right)
+            val screenW = resources.displayMetrics.widthPixels
+            val margin = (12 * resources.displayMetrics.density).toInt()
+            val snapX = if (layoutParams.x + (widthPx / 2) < screenW / 2) {
+                margin
+            } else {
+                screenW - widthPx - margin
+            }
+            layoutParams.x = snapX
+            try {
+                windowManager.updateViewLayout(overlayView, layoutParams)
+            } catch (_: Exception) {}
         }
 
         overlayView.onTap = {
             onAvatarTapped()
+        }
+
+        overlayView.onDoubleTap = {
+            bringMainActivityToForeground()
         }
 
         overlayView.onLongPress = {
@@ -450,17 +479,28 @@ class OverlayService : Service() {
             when {
                 svc.isSleeping.value -> {
                     svc.wakeUp()
-                    android.util.Log.d("OverlayService", "Avatar tapped — waking up from sleep.")
+                    showResponseBubble("☀️ Soltini awake & listening", 2000)
+                    return
                 }
                 svc.connectionState.value == com.soltini.app.network.ConnectionState.Disconnected ||
                 svc.connectionState.value == com.soltini.app.network.ConnectionState.Error -> {
                     svc.connect()
-                    android.util.Log.d("OverlayService", "Avatar tapped — reconnecting.")
+                    showResponseBubble("🔄 Reconnecting...", 2000)
+                    return
+                }
+                svc.isMuted.value -> {
+                    svc.setMute(false)
+                    showResponseBubble("🎙️ Unmuted (listening)", 2000)
+                    return
+                }
+                else -> {
+                    // Tap to Mute: User is manually using their phone and wants Soltini to pause listening
+                    svc.setMute(true)
+                    showResponseBubble("🤫 Muted (tap to resume)", 2000)
+                    return
                 }
             }
         }
-        // Always bring MainActivity to foreground (singleTop — no duplicate)
-        bringMainActivityToForeground()
     }
 
     /** Opens MainActivity or brings it to the foreground without creating a new instance. */
@@ -710,7 +750,9 @@ class OverlayService : Service() {
             }
         }
 
-        menuLayout.addView(createButton("🌸 Open Soltini App", true, false) { onAvatarTapped() })
+        menuLayout.setOnClickListener { /* Consume clicks inside menu card */ }
+
+        menuLayout.addView(createButton("🌸 Open Soltini App", true, false) { bringMainActivityToForeground() })
         
         val isSleeping = voiceService?.isSleeping?.value == true
         menuLayout.addView(createButton(if (isSleeping) "☀️ Wake Up Voice" else "🌙 Sleep Voice", false, false) {

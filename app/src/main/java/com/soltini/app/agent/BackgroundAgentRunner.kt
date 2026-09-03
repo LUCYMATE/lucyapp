@@ -75,7 +75,8 @@ Your job is to execute the user's requested phone automation task cleanly and sw
 4. **Multi-Step Tasks**:
    - For WhatsApp: call `whatsapp_send_message` or `whatsapp_call`.
    - For YouTube: call `youtube_search`, `youtube_open_video`, `youtube_play_pause`, etc.
-5. **Completion**: When the entire task is finished, return a brief, friendly 1-2 sentence summary of what was done. Do NOT call any more tools once finished."""
+5. **User Control**: Never perform unexpected screen actions, gestures, or navigation outside of the explicit request: "$requestText". Preserve the user's screen state.
+6. **Completion**: When the entire task is finished, return a brief, friendly 1-2 sentence summary of what was done. Do NOT call any more tools once finished."""
 
         val contents = JSONArray().apply {
             put(JSONObject().apply {
