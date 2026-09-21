@@ -1,4 +1,4 @@
-import com.google.gms.googleservices.GoogleServicesPlugin.MissingGoogleServicesStrategy
+﻿import com.google.gms.googleservices.GoogleServicesPlugin.MissingGoogleServicesStrategy
 
 plugins {
   alias(libs.plugins.android.application)
@@ -10,11 +10,11 @@ plugins {
 }
 
 android {
-  namespace = "com.soltini.app"
+  namespace = "com.lucy.mate"
   compileSdk { version = release(36) { minorApiLevel = 1 } }
 
   defaultConfig {
-    applicationId = "com.soltini.app"
+    applicationId = "com.lucy.mate"
     minSdk = 26
     targetSdk = 36
     versionCode = 1
@@ -28,12 +28,12 @@ android {
   productFlavors {
     create("playstore") {
       dimension = "distribution"
-      applicationId = "com.soltini.app"
+      applicationId = "com.lucy.mate"
       versionName = "1.0.0"
     }
     create("standalone") {
       dimension = "distribution"
-      applicationId = "com.soltini.app"
+      applicationId = "com.lucy.mate"
       versionName = "1.0.0-standalone"
     }
   }

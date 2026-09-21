@@ -1,4 +1,4 @@
-<?xml version="1.0" encoding="utf-8"?>
+﻿<?xml version="1.0" encoding="utf-8"?>
 <!--
   Accessibility Service configuration for SoltiniAccessibilityService.
 
@@ -32,4 +32,4 @@
     android:canTakeScreenshot="true"
     android:description="@string/accessibility_service_description"
     android:notificationTimeout="100"
-    android:settingsActivity="com.soltini.app.MainActivity" />
+    android:settingsActivity="com.lucy.mate.MainActivity" />

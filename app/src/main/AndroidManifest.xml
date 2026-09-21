@@ -1,4 +1,4 @@
-<?xml version="1.0" encoding="utf-8"?>
+﻿<?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
     xmlns:tools="http://schemas.android.com/tools">
 
@@ -88,18 +88,18 @@
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
-            <!-- Intent filter for sharing audio files to Soltini -->
+            <!-- Intent filter for sharing audio files to LUCY -->
             <intent-filter>
                 <action android:name="android.intent.action.SEND" />
                 <category android:name="android.intent.category.DEFAULT" />
                 <data android:mimeType="audio/*" />
             </intent-filter>
-            <!-- Intent filter for Soltini Auth deep links (OAuth callback) -->
+            <!-- Intent filter for LUCY Auth deep links (OAuth callback) -->
             <intent-filter>
                 <action android:name="android.intent.action.VIEW" />
                 <category android:name="android.intent.category.DEFAULT" />
                 <category android:name="android.intent.category.BROWSABLE" />
-                <data android:scheme="soltini" />
+                <data android:scheme="lucymate" />
             </intent-filter>
         </activity>
 
@@ -159,7 +159,7 @@
         <!-- ── NotificationListenerService ──────────────────────────────── -->
         <service
             android:name=".automation.SoltiniNotificationListener"
-            android:label="Soltini Notification Assistant"
+            android:label="LUCY Notification Assistant"
             android:permission="android.permission.BIND_NOTIFICATION_LISTENER_SERVICE"
             android:exported="false">
             <intent-filter>
@@ -191,7 +191,7 @@
         <service
             android:name=".services.BankingModeTileService"
             android:icon="@mipmap/ic_launcher"
-            android:label="Soltini Banking Mode"
+            android:label="LUCY Banking Mode"
             android:permission="android.permission.BIND_QUICK_SETTINGS_TILE"
             android:exported="true">
             <intent-filter>
@@ -213,7 +213,7 @@
                 <action android:name="com.htc.intent.action.QUICKBOOT_POWERON" />
                 <action android:name="android.intent.action.MY_PACKAGE_REPLACED" />
                 <action android:name="android.intent.action.REBOOT" />
-                <action android:name="com.soltini.app.RESTART_SERVICE" />
+                <action android:name="com.lucy.mate.RESTART_SERVICE" />
                 <category android:name="android.intent.category.DEFAULT" />
             </intent-filter>
         </receiver>
@@ -230,7 +230,7 @@
             android:name=".core.ReminderReceiver"
             android:exported="true">
             <intent-filter>
-                <action android:name="com.soltini.app.ACTION_REMINDER" />
+                <action android:name="com.lucy.mate.ACTION_REMINDER" />
             </intent-filter>
         </receiver>
 
