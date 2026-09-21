@@ -3,15 +3,29 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Aria Avatar</title>
+  <title>Soltini 3D Avatar</title>
   <style>
     * { margin: 0; padding: 0; box-sizing: border-box; }
     html, body { width: 100%; height: 100%; background: transparent; overflow: hidden; }
-    #canvas-container { width: 100%; height: 100%; }
+    #canvas-container { position: absolute; left: 0; top: 0; width: 100%; height: 100%; }
+    canvas { width: 100% !important; height: 100% !important; display: block; }
   </style>
-  <script type="module" crossorigin src="./bundle.js"></script>
 </head>
 <body>
   <div id="canvas-container"></div>
+  <script src="./bundle.js"></script>
+  <script>
+    console.log("[HTML] index.html executed. innerWidth=" + window.innerWidth + ", innerHeight=" + window.innerHeight + ", dpr=" + window.devicePixelRatio);
+    window.addEventListener("resize", () => {
+      console.log("[HTML] window resize: " + window.innerWidth + "x" + window.innerHeight);
+    });
+    setInterval(() => {
+      const cont = document.getElementById("canvas-container");
+      const c = document.querySelector("canvas");
+      console.log("[HTML-STATS] container: " + (cont ? cont.clientWidth + "x" + cont.clientHeight : "null") + 
+                  ", canvas: " + (c ? c.width + "x" + c.height + " (style: " + c.style.width + "x" + c.style.height + ")" : "none") +
+                  ", Aria: " + (typeof window.Aria !== "undefined"));
+    }, 2500);
+  </script>
 </body>
 </html>

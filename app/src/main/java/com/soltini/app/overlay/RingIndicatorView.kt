@@ -31,10 +31,11 @@ class RingIndicatorView(context: Context) : View(context) {
     private var pulseScale = 1f
     private var pulseAnimator: ValueAnimator? = null
     
+    @Volatile
     var amplitude: Float = 0f
         set(value) {
             field = value
-            invalidate()
+            postInvalidateOnAnimation()
         }
 
     var state: RingState = RingState.IDLE

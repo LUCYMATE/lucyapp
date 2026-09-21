@@ -1,4 +1,4 @@
-﻿package com.soltini.app.ui.settings
+package com.soltini.app.ui.settings
 
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -12,8 +12,11 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.ArrowDropDown
 import com.soltini.app.ui.theme.*
 
 @Composable
@@ -127,7 +130,6 @@ fun SettingsSliderRow(
     }
 }
 
-@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun SettingsDropdownRow(
     icon: ImageVector,
@@ -152,32 +154,69 @@ fun SettingsDropdownRow(
             modifier = Modifier.size(24.dp)
         )
         Spacer(Modifier.width(16.dp))
-        Text(title, color = TextPrimary, fontSize = 15.sp, fontWeight = FontWeight.SemiBold)
-        Spacer(Modifier.weight(1f))
+        Text(
+            text = title,
+            color = TextPrimary,
+            fontSize = 15.sp,
+            fontWeight = FontWeight.SemiBold,
+            modifier = Modifier.weight(1f)
+        )
+        Spacer(Modifier.width(8.dp))
         
-        ExposedDropdownMenuBox(
-            expanded = expanded,
-            onExpandedChange = { expanded = it }
-        ) {
-            Text(
-                text = selectedOption,
-                color = RosePink,
-                fontSize = 14.sp,
-                fontWeight = FontWeight.Bold,
-                modifier = Modifier.menuAnchor()
-            )
-            ExposedDropdownMenu(
+        Box {
+            Surface(
+                onClick = { expanded = true },
+                shape = RoundedCornerShape(10.dp),
+                color = RosePink.copy(alpha = 0.08f),
+                border = androidx.compose.foundation.BorderStroke(1.dp, PinkyBorder)
+            ) {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp)
+                ) {
+                    Text(
+                        text = selectedOption,
+                        color = RosePink,
+                        fontSize = 13.sp,
+                        fontWeight = FontWeight.Bold,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.widthIn(max = 160.dp)
+                    )
+                    Spacer(Modifier.width(4.dp))
+                    Icon(
+                        imageVector = Icons.Default.ArrowDropDown,
+                        contentDescription = null,
+                        tint = RosePink,
+                        modifier = Modifier.size(18.dp)
+                    )
+                }
+            }
+
+            DropdownMenu(
                 expanded = expanded,
                 onDismissRequest = { expanded = false },
-                modifier = Modifier.background(PearlWhiteSurface)
+                modifier = Modifier
+                    .background(PearlWhiteSurface)
+                    .border(1.dp, PinkyBorder, RoundedCornerShape(12.dp))
+                    .widthIn(min = 220.dp, max = 340.dp)
             ) {
                 options.forEach { option ->
+                    val isSelected = option == selectedOption || option.startsWith(selectedOption)
                     DropdownMenuItem(
-                        text = { Text(option, color = TextPrimary) },
+                        text = {
+                            Text(
+                                text = option,
+                                color = if (isSelected) RosePink else TextPrimary,
+                                fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Normal,
+                                fontSize = 13.sp
+                            )
+                        },
                         onClick = {
                             onOptionSelected(option)
                             expanded = false
-                        }
+                        },
+                        contentPadding = PaddingValues(horizontal = 16.dp, vertical = 10.dp)
                     )
                 }
             }

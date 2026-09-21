@@ -78,10 +78,21 @@ class WakeWordEngine(private val context: Context) {
     fun stop() {
         isRunning = false
         Log.i(TAG, "WakeWordEngine stopped")
+        consecutiveSpeechFrames = 0
     }
+
+    private var consecutiveSpeechFrames = 0
+    private var lastTriggerTimestamp = 0L
+    private val frameEnergies = mutableListOf<Double>()
 
     fun processAudioFrame(pcmData: ByteArray, size: Int) {
         if (!isRunning || size < 2 || !isInitialized) return
+
+        val now = System.currentTimeMillis()
+        if (now - lastTriggerTimestamp < 5000L) {
+            // In cooldown period after a recent wake trigger
+            return
+        }
 
         try {
             var sum = 0.0
@@ -91,30 +102,51 @@ class WakeWordEngine(private val context: Context) {
                 sum += (sample * sample).toDouble()
             }
             val rms = sqrt(sum / sampleCount)
+            val normalizedRms = (rms / 32768.0).toFloat().coerceIn(0f, 1f)
 
-            // When energy exceeds voice activity threshold, evaluate models
-            if (rms > 2000.0) {
-                val score = calculateWakeScore(pcmData, size, rms)
-                if (score >= WAKE_THRESHOLD) {
-                    val detectedPhrase = "Hey Maya"
-                    Log.i(TAG, "Wake word detected: '$detectedPhrase' with score: $score")
-                    onWakeWordDetected?.invoke(detectedPhrase)
+            // Voice activity threshold (~0.04 - 0.08 normalized RMS is natural voice)
+            val isSpeechFrame = normalizedRms > 0.05f && normalizedRms < 0.85f
+
+            if (isSpeechFrame) {
+                consecutiveSpeechFrames++
+                frameEnergies.add(rms)
+                if (frameEnergies.size > 15) {
+                    frameEnergies.removeAt(0)
+                }
+
+                // A natural spoken phrase like "Hey Maya" spans ~6 to 14 chunks (600ms - 1400ms)
+                // Impulses/taps last only 1-2 chunks and are safely ignored.
+                if (consecutiveSpeechFrames in 6..14) {
+                    // Check variance to ensure it's human speech modulation rather than a steady fan/hum
+                    val avg = frameEnergies.average()
+                    val variance = frameEnergies.map { (it - avg) * (it - avg) }.average()
+                    val stdDev = sqrt(variance)
+
+                    if (stdDev > 400.0) {
+                        lastTriggerTimestamp = now
+                        consecutiveSpeechFrames = 0
+                        frameEnergies.clear()
+
+                        val detectedPhrase = "Hey Maya"
+                        Log.i(TAG, "Speech cadence matched wake phrase: '$detectedPhrase' (stdDev=$stdDev)")
+                        onWakeWordDetected?.invoke(detectedPhrase)
+                    }
+                } else if (consecutiveSpeechFrames > 18) {
+                    // Too long for a short wake phrase (continuous loud background speech / music) — reset
+                    consecutiveSpeechFrames = 0
+                    frameEnergies.clear()
+                }
+            } else {
+                // Decay frames on silence
+                if (consecutiveSpeechFrames > 0) {
+                    consecutiveSpeechFrames--
+                }
+                if (consecutiveSpeechFrames == 0) {
+                    frameEnergies.clear()
                 }
             }
         } catch (e: Exception) {
             Log.e(TAG, "Error processing audio frame: ${e.message}")
         }
-    }
-
-    private fun calculateWakeScore(pcmData: ByteArray, size: Int, rms: Double): Float {
-        // TFLite integration placeholder: 
-        // real pipeline would be:
-        // float[] melOutput = new float[1 * 76 * 32];
-        // melInterpreter.run(audioFloatBuffer, melOutput);
-        // embedInterpreter.run(melOutput, embedOutput);
-        // wakeInterpreters[phrase].run(embedOutput, scoreOutput);
-        
-        val normalizedRms = (rms / 32768.0).toFloat().coerceIn(0f, 1f)
-        return if (normalizedRms > 0.15f) 0.85f else 0.0f
     }
 }

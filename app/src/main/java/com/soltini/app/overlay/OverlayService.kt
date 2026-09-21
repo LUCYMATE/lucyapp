@@ -1,6 +1,7 @@
 package com.soltini.app.overlay
 
 import android.annotation.SuppressLint
+import android.app.AlarmManager
 import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
@@ -13,6 +14,7 @@ import android.os.Build
 import android.os.Handler
 import android.os.IBinder
 import android.os.Looper
+import android.os.SystemClock
 import android.provider.Settings
 import android.view.Gravity
 import android.view.MotionEvent
@@ -25,9 +27,14 @@ import android.webkit.WebViewClient
 import android.widget.FrameLayout
 import android.widget.TextView
 import androidx.core.app.NotificationCompat
+import com.soltini.app.BootReceiver
 import com.soltini.app.MainActivity
 import com.soltini.app.R
 import com.soltini.app.bridge.AriaNativeBridge
+import com.soltini.app.engine.SoltiniGLRenderer
+import com.soltini.app.engine.SoltiniGLTextureView
+import com.soltini.app.engine.SoltiniLive2DEngine
+import com.soltini.app.settings.AppSettings
 import kotlin.math.abs
 import kotlin.math.max
 import kotlin.math.min
@@ -156,13 +163,17 @@ class OverlayService : Service() {
 
     private lateinit var windowManager: WindowManager
     private lateinit var overlayView: DraggableFrameLayout
-    private lateinit var webView: WebView
+    private var webView: WebView? = null
+    private var glView: SoltiniGLTextureView? = null
+    @Volatile private var lastVrmAmpPostTime = 0L
     private lateinit var errorTextView: TextView
     private lateinit var ringIndicatorView: RingIndicatorView
+    private var currentVisualizerMode: String = "ORB"
+    private var currentCharacterName: String = "LUCY"
     private lateinit var layoutParams: WindowManager.LayoutParams
     private val mainHandler = Handler(Looper.getMainLooper())
     private val bridge = AriaNativeBridge(this)
-
+    private val overlayLive2DEngine = SoltiniLive2DEngine(engineTag = "Overlay")
     private var voiceService: com.soltini.app.services.BackgroundVoiceService? = null
     private var isBound = false
 
@@ -240,18 +251,46 @@ class OverlayService : Service() {
     }
 
     private fun updateNotification() {
-        val notificationManager = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
-        notificationManager.notify(NOTIFICATION_ID, createNotification())
+        try {
+            val notificationManager = getSystemService(Context.NOTIFICATION_SERVICE) as? NotificationManager
+            notificationManager?.notify(NOTIFICATION_ID, createNotification())
+        } catch (e: Throwable) {
+            android.util.Log.w("OverlayService", "Failed to update notification: ${e.message}")
+        }
     }
 
     override fun onCreate() {
         super.onCreate()
         instance = this
         createNotificationChannel()
-        startForeground(NOTIFICATION_ID, createNotification())
+        if (Build.VERSION.SDK_INT >= 34) {
+            try {
+                // FOREGROUND_SERVICE_TYPE_SPECIAL_USE = 0x40000000 (1073741824)
+                startForeground(
+                    NOTIFICATION_ID,
+                    createNotification(),
+                    1073741824
+                )
+            } catch (e: Exception) {
+                android.util.Log.w("OverlayService", "startForeground with SPECIAL_USE failed: ${e.message}")
+                try {
+                    startForeground(NOTIFICATION_ID, createNotification())
+                } catch (fatal: Exception) {
+                    android.util.Log.e("OverlayService", "Fatal startForeground error: ${fatal.message}", fatal)
+                }
+            }
+        } else {
+            startForeground(NOTIFICATION_ID, createNotification())
+        }
 
         Intent(this, com.soltini.app.services.BackgroundVoiceService::class.java).also { intent ->
             bindService(intent, connection, Context.BIND_AUTO_CREATE)
+        }
+
+        if (AppSettings(this).isAppPaused) {
+            android.util.Log.i("OverlayService", "App is paused — skipping overlay setup and stopping")
+            stopSelf()
+            return
         }
 
         // Safety check: only add overlay if permission is granted
@@ -264,6 +303,10 @@ class OverlayService : Service() {
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        if (AppSettings(this).isAppPaused) {
+            stopSelf()
+            return START_NOT_STICKY
+        }
         when (intent?.action) {
             ACTION_STOP -> {
                 stopSelf()
@@ -274,7 +317,181 @@ class OverlayService : Service() {
                 return START_NOT_STICKY
             }
         }
-        return START_NOT_STICKY
+        return START_STICKY
+    }
+
+    override fun onTaskRemoved(rootIntent: Intent?) {
+        super.onTaskRemoved(rootIntent)
+        android.util.Log.i("OverlayService", "onTaskRemoved: task cleared from recents")
+        val appSettings = AppSettings(this)
+        if (appSettings.isAppPaused) {
+            android.util.Log.i("OverlayService", "App is paused, skipping overlay resurrection")
+            return
+        }
+        if (!appSettings.isAutoStartEnabled) {
+            android.util.Log.i("OverlayService", "Auto-start disabled, skipping overlay resurrection")
+            return
+        }
+
+        // Only schedule if voice service isn't alive or hasn't scheduled it
+        if (com.soltini.app.services.BackgroundVoiceService.getInstance() == null) {
+            try {
+                if (Settings.canDrawOverlays(this)) {
+                    val restartIntent = Intent(applicationContext, BootReceiver::class.java).apply {
+                        action = "com.soltini.app.RESTART_SERVICE"
+                        setPackage(packageName)
+                    }
+                    val pendingIntent = PendingIntent.getBroadcast(
+                        applicationContext,
+                        1003,
+                        restartIntent,
+                        PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+                    )
+                    val alarmManager = getSystemService(Context.ALARM_SERVICE) as? AlarmManager
+                    val triggerAt = System.currentTimeMillis() + 1000L
+
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
+                        try {
+                            val showIntent = PendingIntent.getActivity(
+                                applicationContext,
+                                0,
+                                Intent(applicationContext, MainActivity::class.java).apply {
+                                    flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP
+                                },
+                                PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+                            )
+                            // setAlarmClock grants Android 12+ FGS start exemption
+                            val alarmClockInfo = AlarmManager.AlarmClockInfo(triggerAt, showIntent)
+                            alarmManager?.setAlarmClock(alarmClockInfo, pendingIntent)
+                            android.util.Log.i("OverlayService", "Overlay resurrection scheduled via setAlarmClock")
+                            return
+                        } catch (e: Throwable) {
+                            android.util.Log.w("OverlayService", "setAlarmClock failed: ${e.message}")
+                        }
+                    }
+
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                        alarmManager?.setExactAndAllowWhileIdle(
+                            AlarmManager.RTC_WAKEUP,
+                            triggerAt,
+                            pendingIntent
+                        )
+                    } else {
+                        alarmManager?.set(
+                            AlarmManager.RTC_WAKEUP,
+                            triggerAt,
+                            pendingIntent
+                        )
+                    }
+                }
+            } catch (e: Throwable) {
+                android.util.Log.w("OverlayService", "Failed to schedule overlay resurrection: ${e.message}")
+            }
+        }
+    }
+
+    @SuppressLint("SetJavaScriptEnabled")
+    private fun getOrCreateWebView(): WebView {
+        webView?.let { return it }
+        val assetLoader = androidx.webkit.WebViewAssetLoader.Builder()
+            .addPathHandler("/assets/", androidx.webkit.WebViewAssetLoader.AssetsPathHandler(this))
+            .build()
+
+        val wv = WebView(this).apply {
+            settings.apply {
+                javaScriptEnabled = true
+                allowFileAccess = true
+                @Suppress("DEPRECATION")
+                allowFileAccessFromFileURLs = true
+                @Suppress("DEPRECATION")
+                allowUniversalAccessFromFileURLs = true
+                domStorageEnabled = true
+                cacheMode = WebSettings.LOAD_NO_CACHE
+                mediaPlaybackRequiresUserGesture = false
+            }
+            setBackgroundColor(Color.TRANSPARENT)
+            setLayerType(View.LAYER_TYPE_HARDWARE, null)
+            addJavascriptInterface(bridge, "AriaNative")
+            webViewClient = object : WebViewClient() {
+                override fun shouldInterceptRequest(
+                    view: WebView?,
+                    request: android.webkit.WebResourceRequest?
+                ): android.webkit.WebResourceResponse? {
+                    val url = request?.url ?: return null
+
+                    // 1. Direct handling of .vrm with full binary response and CORS headers
+                    if (url.path?.endsWith(".vrm", ignoreCase = true) == true) {
+                        try {
+                            val assetPath = url.path!!.trimStart('/').removePrefix("assets/")
+                            val isStream = assets.open(assetPath)
+                            val length = try {
+                                assets.openFd(assetPath).length.toString()
+                            } catch (e: Exception) {
+                                null
+                            }
+                            val headers = mutableMapOf(
+                                "Access-Control-Allow-Origin" to "*",
+                                "Access-Control-Allow-Methods" to "GET, OPTIONS, HEAD",
+                                "Access-Control-Allow-Headers" to "*",
+                                "Content-Type" to "model/gltf-binary"
+                            )
+                            length?.let { headers["Content-Length"] = it }
+                            return android.webkit.WebResourceResponse("model/gltf-binary", null, 200, "OK", headers, isStream)
+                        } catch (e: Exception) {
+                            android.util.Log.e("OverlayService", "Failed direct soltini.vrm load", e)
+                        }
+                    }
+
+                    // 2. Delegate all other assets through WebViewAssetLoader with CORS headers
+                    val response = assetLoader.shouldInterceptRequest(url)
+                    if (response != null) {
+                        val headers = HashMap(response.responseHeaders ?: emptyMap())
+                        headers["Access-Control-Allow-Origin"] = "*"
+                        headers["Access-Control-Allow-Methods"] = "GET, OPTIONS, HEAD"
+                        headers["Access-Control-Allow-Headers"] = "*"
+                        response.responseHeaders = headers
+                        if (url.path?.endsWith(".js", ignoreCase = true) == true) {
+                            response.mimeType = "application/javascript"
+                        }
+                        return response
+                    }
+                    return null
+                }
+
+                override fun onPageFinished(view: WebView?, url: String?) {
+                    super.onPageFinished(view, url)
+                    android.util.Log.d("OverlayService", "WebView page finished: $url")
+                    view?.evaluateJavascript("window.dispatchEvent(new Event('resize')); if (window.Aria) { window.Aria.setListening(true); }", null)
+                }
+
+                override fun onReceivedError(
+                    view: WebView?,
+                    request: android.webkit.WebResourceRequest?,
+                    error: android.webkit.WebResourceError?
+                ) {
+                    android.util.Log.e("OverlayService", "WebView error: ${error?.description} for ${request?.url}")
+                }
+            }
+            loadUrl("https://appassets.androidplatform.net/assets/avatar/index.html")
+        }
+        webView = wv
+        overlayView.addView(wv, 0, FrameLayout.LayoutParams(
+            FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT
+        ))
+        return wv
+    }
+
+    private fun getOrCreateGLView(): SoltiniGLTextureView {
+        glView?.let { return it }
+        val gl = SoltiniGLTextureView(this).apply {
+            setRenderer(SoltiniGLRenderer(this@OverlayService, overlayLive2DEngine))
+        }
+        glView = gl
+        val index = if (webView != null) 1 else 0
+        overlayView.addView(gl, index, FrameLayout.LayoutParams(
+            FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT
+        ))
+        return gl
     }
 
     @SuppressLint("SetJavaScriptEnabled")
@@ -284,47 +501,8 @@ class OverlayService : Service() {
         // Use our custom DraggableFrameLayout instead of plain FrameLayout
         overlayView = DraggableFrameLayout(this)
 
-        // ── WebView setup ────────────────────────────────────────────────────────
-        webView = WebView(this).apply {
-            settings.apply {
-                javaScriptEnabled = true
-                allowFileAccess = true
-                @Suppress("DEPRECATION")
-                allowFileAccessFromFileURLs = true
-                @Suppress("DEPRECATION")
-                allowUniversalAccessFromFileURLs = true
-                domStorageEnabled = true
-                // Enable hardware acceleration for Three.js / WebGL
-                cacheMode = WebSettings.LOAD_NO_CACHE
-                mediaPlaybackRequiresUserGesture = false
-            }
-            setBackgroundColor(Color.TRANSPARENT)
-            setLayerType(View.LAYER_TYPE_HARDWARE, null)
-            visibility = View.GONE // Disabled 3D display as per user request to avoid errors
-            onPause()
-            pauseTimers()
-            addJavascriptInterface(bridge, "AriaNative")
-            // WebViewClient to suppress error pages
-            webViewClient = object : WebViewClient() {
-                override fun onPageFinished(view: WebView?, url: String?) {
-                    super.onPageFinished(view, url)
-                    android.util.Log.d("OverlayService", "WebView page finished: $url")
-                }
-                override fun onReceivedError(
-                    view: WebView?,
-                    request: android.webkit.WebResourceRequest?,
-                    error: android.webkit.WebResourceError?
-                ) {
-                    android.util.Log.e("OverlayService", "WebView error: ${error?.description} for ${request?.url}")
-                }
-            }
-            loadUrl("file:///android_asset/avatar/index.html")
-        }
-
-        // ── Ring indicator ────────────────────────────────────────────────────
+        // ── Ring indicator (primary lightweight visualizer) ──────────────────
         ringIndicatorView = RingIndicatorView(this)
-
-        // ── Fallback removed (using RingIndicatorView as primary orb) ──
 
         // ── Floating Response Bubble & Error Banner ──────────────────────────
         errorTextView = TextView(this).apply {
@@ -348,12 +526,6 @@ class OverlayService : Service() {
             setPadding(padH, padV, padH, padV)
         }
 
-
-        // Add children
-        overlayView.addView(webView, FrameLayout.LayoutParams(
-            FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT
-        ))
-
         val ringMargin = (8 * resources.displayMetrics.density).toInt()
         val ringParams = FrameLayout.LayoutParams(
             FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT
@@ -366,9 +538,10 @@ class OverlayService : Service() {
         overlayView.addView(errorTextView, errorParams)
 
         // ── Window layout params ──────────────────────────────────────────────
-        // Compact 64dp orb: small, elegant, side-docked, never interferes with navigation bar or keyboard
-        val widthPx  = (64 * resources.displayMetrics.density).toInt()
-        val heightPx = (64 * resources.displayMetrics.density).toInt()
+        val settings = AppSettings(this)
+        val initialSizeDp = settings.getFloatingSizeDp(settings.visualizerMode)
+        val widthPx  = (initialSizeDp * resources.displayMetrics.density).toInt()
+        val heightPx = (initialSizeDp * resources.displayMetrics.density).toInt()
 
         layoutParams = WindowManager.LayoutParams(
             widthPx, heightPx,
@@ -386,9 +559,14 @@ class OverlayService : Service() {
             val screenWidth = resources.displayMetrics.widthPixels
             val screenHeight = resources.displayMetrics.heightPixels
             gravity = Gravity.TOP or Gravity.START
-            // Docked comfortably to upper-right side edge, safe from bottom navigation bar
-            x = screenWidth - widthPx - (12 * resources.displayMetrics.density).toInt()
-            y = (screenHeight * 0.35f).toInt()
+            val settings = AppSettings(this@OverlayService)
+            if (settings.overlayPositionX != -9999 && settings.overlayPositionY != -9999) {
+                x = settings.overlayPositionX
+                y = settings.overlayPositionY
+            } else {
+                x = screenWidth - widthPx - (12 * resources.displayMetrics.density).toInt()
+                y = (screenHeight * 0.35f).toInt()
+            }
         }
 
         // ── Drag callbacks ────────────────────────────────────────────────────
@@ -403,18 +581,28 @@ class OverlayService : Service() {
         }
 
         overlayView.onDragEnd = {
-            // Snap smoothly to nearest screen edge (left or right)
+            // Stay EXACTLY wherever the user drops it (middle, corner, edge — zero snap/bounce)
             val screenW = resources.displayMetrics.widthPixels
-            val margin = (12 * resources.displayMetrics.density).toInt()
-            val snapX = if (layoutParams.x + (widthPx / 2) < screenW / 2) {
-                margin
-            } else {
-                screenW - widthPx - margin
-            }
-            layoutParams.x = snapX
+            val screenH = resources.displayMetrics.heightPixels
+            val curW = layoutParams.width
+            val curH = layoutParams.height
+
+            val minX = -(curW * 0.40f).toInt()
+            val maxX = (screenW - (curW * 0.45f)).toInt()
+            val minY = 0
+            val maxY = (screenH - (curH * 0.50f)).toInt()
+
+            layoutParams.x = layoutParams.x.coerceIn(minX, maxX)
+            layoutParams.y = layoutParams.y.coerceIn(minY, maxY)
+
             try {
                 windowManager.updateViewLayout(overlayView, layoutParams)
             } catch (_: Exception) {}
+
+            AppSettings(this@OverlayService).apply {
+                overlayPositionX = layoutParams.x
+                overlayPositionY = layoutParams.y
+            }
         }
 
         overlayView.onTap = {
@@ -432,15 +620,111 @@ class OverlayService : Service() {
         // ── Add to window ─────────────────────────────────────────────────────
         try {
             windowManager.addView(overlayView, layoutParams)
+            val settings = AppSettings(this)
+            updateVisualizer(settings.visualizerMode, settings.characterPersona)
         } catch (e: Exception) {
             android.util.Log.e("OverlayService", "addView failed: ${e.message}")
             stopSelf()
         }
     }
 
+    /**
+     * Dynamically resize floating window layout params and reposition within screen bounds.
+     */
+    fun updateWindowSize(sizeDp: Int) {
+        mainHandler.post {
+            if (!::overlayView.isInitialized || !::windowManager.isInitialized || !::layoutParams.isInitialized) return@post
+            val density = resources.displayMetrics.density
+            val newSizePx = (sizeDp * density).toInt().coerceAtLeast((40 * density).toInt())
+
+            layoutParams.width = newSizePx
+            layoutParams.height = newSizePx
+
+            val screenW = resources.displayMetrics.widthPixels
+            val screenH = resources.displayMetrics.heightPixels
+            val minX = -(newSizePx * 0.40f).toInt()
+            val maxX = (screenW - (newSizePx * 0.45f)).toInt()
+            val minY = 0
+            val maxY = (screenH - (newSizePx * 0.50f)).toInt()
+            layoutParams.x = layoutParams.x.coerceIn(minX, maxX)
+            layoutParams.y = layoutParams.y.coerceIn(minY, maxY)
+
+            try {
+                windowManager.updateViewLayout(overlayView, layoutParams)
+                webView?.let { wv ->
+                    if (wv.visibility == View.VISIBLE) {
+                        wv.evaluateJavascript("window.dispatchEvent(new Event('resize'));", null)
+                    }
+                }
+            } catch (e: Exception) {
+                android.util.Log.e("OverlayService", "updateViewLayout failed: ${e.message}")
+            }
+        }
+    }
+
+    /**
+     * Dynamically switches the floating overlay between:
+     * 1. ORB: RingIndicatorView only (webView & glView hidden)
+     * 2. 3D VRM: webView only (ringIndicatorView & glView hidden)
+     * 3. 2D Live2D: glView only (ringIndicatorView & webView hidden)
+     * Never overlaps visualizers — only ONE displays at a time!
+     */
+    fun updateVisualizer(mode: String, characterName: String) {
+        currentVisualizerMode = mode
+        currentCharacterName = characterName
+        val isVrm = characterName.contains("Soltini", ignoreCase = true) ||
+                characterName == AppSettings.CHARACTER_SOLTINI
+
+        android.util.Log.i("OverlayService", "updateVisualizer: mode=$mode, character=$characterName, isVrm=$isVrm")
+
+        // Dynamically adjust window size to the configured preference for this visualizer mode
+        val preferredSize = AppSettings(this).getFloatingSizeDp(mode)
+        updateWindowSize(preferredSize)
+
+        mainHandler.post {
+            if (!::ringIndicatorView.isInitialized) return@post
+
+            if (mode.equals("ORB", ignoreCase = true)) {
+                ringIndicatorView.visibility = View.VISIBLE
+                webView?.visibility = View.GONE
+                glView?.apply {
+                    visibility = View.GONE
+                    setPaused(true)
+                }
+            } else if (isVrm) {
+                // 3D VRM (Soltini): clean avatar, hide the orb ring!
+                ringIndicatorView.visibility = View.GONE
+                glView?.apply {
+                    visibility = View.GONE
+                    setPaused(true)
+                }
+                val wv = getOrCreateWebView()
+                wv.visibility = View.VISIBLE
+            } else {
+                // 2D Live2D (Maya, Friday, Venom): clean avatar, hide the orb ring!
+                ringIndicatorView.visibility = View.GONE
+                webView?.visibility = View.GONE
+                val gl = getOrCreateGLView()
+                gl.visibility = View.VISIBLE
+                gl.setPaused(false)
+                overlayLive2DEngine.requestCharacter(characterName, this@OverlayService)
+            }
+        }
+    }
+
     fun onModelReady() {
         mainHandler.post {
-            // Nothing to hide anymore, orb stays visible
+            android.util.Log.d("OverlayService", "onModelReady: 3D VRM ready")
+            val isVrm = currentCharacterName.contains("Soltini", ignoreCase = true) ||
+                    currentCharacterName == AppSettings.CHARACTER_SOLTINI
+            if (currentVisualizerMode.equals("AVATAR", ignoreCase = true) && isVrm) {
+                ringIndicatorView.visibility = View.GONE
+                webView?.visibility = View.VISIBLE
+                glView?.apply {
+                    visibility = View.GONE
+                    setPaused(true)
+                }
+            }
         }
     }
 
@@ -494,9 +778,8 @@ class OverlayService : Service() {
                     return
                 }
                 else -> {
-                    // Tap to Mute: User is manually using their phone and wants Soltini to pause listening
-                    svc.setMute(true)
-                    showResponseBubble("🤫 Muted (tap to resume)", 2000)
+                    // Single tap = confirm listening. Muting is in long-press menu.
+                    showResponseBubble("👂 I'm listening...", 1500)
                     return
                 }
             }
@@ -584,11 +867,11 @@ class OverlayService : Service() {
             this, 2, toggleIntent, PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
         )
 
-        val toggleTitle = if (isHiddenForBanking) "Resume Soltini" else "Pause (Banking)"
-        val contentText = if (isHiddenForBanking) "Paused for Banking app safety" else "Soltini is running"
+        val toggleTitle = if (isHiddenForBanking) "Resume LUCY" else "Pause (Banking)"
+        val contentText = if (isHiddenForBanking) "Paused for Banking app safety" else "LUCY is running"
 
         return NotificationCompat.Builder(this, CHANNEL_ID)
-            .setContentTitle("Soltini")
+            .setContentTitle("LUCY")
             .setContentText(contentText)
             .setSmallIcon(android.R.drawable.ic_dialog_info)
             .setContentIntent(pendingIntent)
@@ -604,34 +887,75 @@ class OverlayService : Service() {
 
     fun setTalking(isTalking: Boolean) {
         mainHandler.post {
-            webView.evaluateJavascript(
-                "window.Aria && window.Aria.setTalking && window.Aria.setTalking($isTalking)", null
-            )
+            webView?.let { wv ->
+                if (wv.visibility == View.VISIBLE) {
+                    wv.evaluateJavascript(
+                        "window.Aria && window.Aria.setTalking && window.Aria.setTalking($isTalking)", null
+                    )
+                }
+            }
+            glView?.let { gl ->
+                if (gl.visibility == View.VISIBLE) {
+                    gl.setActiveFrameRate(isTalking)
+                }
+            }
         }
     }
 
     fun setMouthAmplitude(value: Float) {
-        mainHandler.post {
-            ringIndicatorView.amplitude = value
-            webView.evaluateJavascript(
-                "window.Aria && window.Aria.setMouthAmplitude && window.Aria.setMouthAmplitude($value)", null
-            )
+        if (currentVisualizerMode.equals("ORB", ignoreCase = true)) {
+            // Direct update on RingIndicatorView (thread-safe, postInvalidateOnAnimation internally)
+            if (::ringIndicatorView.isInitialized) {
+                ringIndicatorView.amplitude = value
+            }
+            return
+        }
+
+        val isVrm = currentCharacterName.contains("Soltini", ignoreCase = true) ||
+                currentCharacterName == AppSettings.CHARACTER_SOLTINI
+
+        if (isVrm) {
+            val now = SystemClock.uptimeMillis()
+            if (now - lastVrmAmpPostTime >= 33L) {
+                lastVrmAmpPostTime = now
+                mainHandler.post {
+                    webView?.let { wv ->
+                        if (wv.visibility == View.VISIBLE) {
+                            wv.evaluateJavascript(
+                                "window.Aria && window.Aria.setMouthAmplitude && window.Aria.setMouthAmplitude($value)", null
+                            )
+                        }
+                    }
+                }
+            }
+        } else {
+            // Live2D lip sync is thread-safe on SoltiniLive2DEngine (sets volatile float on SoltiniLive2DModel)
+            val lipAmp = (value * 2.5f).coerceIn(0f, 1f)
+            overlayLive2DEngine.setLipSync(lipAmp)
         }
     }
 
     fun setEmotion(tag: String) {
         mainHandler.post {
-            webView.evaluateJavascript(
-                "window.Aria && window.Aria.setEmotion && window.Aria.setEmotion('$tag')", null
-            )
+            webView?.let { wv ->
+                if (wv.visibility == View.VISIBLE) {
+                    wv.evaluateJavascript(
+                        "window.Aria && window.Aria.setEmotion && window.Aria.setEmotion('$tag')", null
+                    )
+                }
+            }
         }
     }
 
     fun setListening(isListening: Boolean) {
         mainHandler.post {
-            webView.evaluateJavascript(
-                "window.Aria && window.Aria.setListening && window.Aria.setListening($isListening)", null
-            )
+            webView?.let { wv ->
+                if (wv.visibility == View.VISIBLE) {
+                    wv.evaluateJavascript(
+                        "window.Aria && window.Aria.setListening && window.Aria.setListening($isListening)", null
+                    )
+                }
+            }
         }
     }
 
@@ -641,6 +965,15 @@ class OverlayService : Service() {
         if (::windowManager.isInitialized && ::overlayView.isInitialized) {
             try { windowManager.removeView(overlayView) } catch (e: Exception) { /* ignore */ }
         }
+        glView?.let {
+            try { it.destroy() } catch (e: Exception) { /* ignore */ }
+        }
+        glView = null
+        try { overlayLive2DEngine.release() } catch (e: Exception) { /* ignore */ }
+        webView?.let {
+            try { it.destroy() } catch (e: Exception) { /* ignore */ }
+        }
+        webView = null
         if (isBound) {
             unbindService(connection)
             isBound = false
@@ -752,18 +1085,113 @@ class OverlayService : Service() {
 
         menuLayout.setOnClickListener { /* Consume clicks inside menu card */ }
 
-        menuLayout.addView(createButton("🌸 Open Soltini App", true, false) { bringMainActivityToForeground() })
-        
-        val isSleeping = voiceService?.isSleeping?.value == true
-        menuLayout.addView(createButton(if (isSleeping) "☀️ Wake Up Voice" else "🌙 Sleep Voice", false, false) {
-            if (isSleeping) voiceService?.wakeUp() else voiceService?.sleep()
+        menuLayout.addView(createButton("🌸 Open Soltini App", true, false) { bringMainActivityToForeground("voice") })
+
+        menuLayout.addView(createButton("⚙️ Studio Settings", false, false) { bringMainActivityToForeground("settings") })
+
+        val isMuted = voiceService?.isMuted?.value == true
+        menuLayout.addView(createButton(if (isMuted) "🎙️ Unmute Mic" else "🤫 Mute Mic", false, false) {
+            voiceService?.setMute(!isMuted)
         })
-        
-        menuLayout.addView(createButton("⚙️ Assistant Studio", false, false) { bringMainActivityToForeground("settings") })
-        menuLayout.addView(createButton("✕ Dismiss Orb", false, true) { stopSelf() })
+
+        // Floating window size slider container
+        val sliderContainer = android.widget.LinearLayout(this).apply {
+            orientation = android.widget.LinearLayout.VERTICAL
+            val padH = (14 * resources.displayMetrics.density).toInt()
+            val padV = (10 * resources.displayMetrics.density).toInt()
+            setPadding(padH, padV, padH, padV)
+            val containerRadius = 14 * resources.displayMetrics.density
+            background = android.graphics.drawable.GradientDrawable().apply {
+                setColor(Color.parseColor("#FFF5F8")) // Soft blush
+                cornerRadius = containerRadius
+                val strokePx = (1 * resources.displayMetrics.density).toInt()
+                setStroke(strokePx, Color.parseColor("#FCE7F3"))
+            }
+            layoutParams = android.widget.LinearLayout.LayoutParams(
+                android.widget.LinearLayout.LayoutParams.MATCH_PARENT,
+                android.widget.LinearLayout.LayoutParams.WRAP_CONTENT
+            ).apply {
+                topMargin = (2 * resources.displayMetrics.density).toInt()
+                bottomMargin = (8 * resources.displayMetrics.density).toInt()
+            }
+        }
+
+        val sliderHeaderRow = android.widget.LinearLayout(this).apply {
+            orientation = android.widget.LinearLayout.HORIZONTAL
+            layoutParams = android.widget.LinearLayout.LayoutParams(
+                android.widget.LinearLayout.LayoutParams.MATCH_PARENT,
+                android.widget.LinearLayout.LayoutParams.WRAP_CONTENT
+            )
+        }
+
+        val sliderTitle = android.widget.TextView(this).apply {
+            text = "Assistant Size"
+            setTextColor(Color.parseColor("#1E1926"))
+            textSize = 12f
+            typeface = android.graphics.Typeface.DEFAULT_BOLD
+            layoutParams = android.widget.LinearLayout.LayoutParams(
+                0,
+                android.widget.LinearLayout.LayoutParams.WRAP_CONTENT,
+                1f
+            )
+        }
+
+        val currentSizeDp = AppSettings(this).getFloatingSizeDp(currentVisualizerMode)
+        val sliderValueLabel = android.widget.TextView(this).apply {
+            text = "${currentSizeDp}dp"
+            setTextColor(Color.parseColor("#F43F8E"))
+            textSize = 12f
+            typeface = android.graphics.Typeface.DEFAULT_BOLD
+        }
+
+        sliderHeaderRow.addView(sliderTitle)
+        sliderHeaderRow.addView(sliderValueLabel)
+        sliderContainer.addView(sliderHeaderRow)
+
+        val sizeSeekBar = android.widget.SeekBar(this).apply {
+            max = 240 // range 60 to 300 dp
+            progress = (currentSizeDp - 60).coerceIn(0, 240)
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
+                progressTintList = android.content.res.ColorStateList.valueOf(Color.parseColor("#F43F8E"))
+                thumbTintList = android.content.res.ColorStateList.valueOf(Color.parseColor("#F43F8E"))
+            }
+            setPadding(0, (6 * resources.displayMetrics.density).toInt(), 0, 0)
+            setOnSeekBarChangeListener(object : android.widget.SeekBar.OnSeekBarChangeListener {
+                override fun onProgressChanged(seekBar: android.widget.SeekBar?, progress: Int, fromUser: Boolean) {
+                    val newSize = progress + 60
+                    sliderValueLabel.text = "${newSize}dp"
+                    updateWindowSize(newSize)
+                    val appSettings = AppSettings(this@OverlayService)
+                    if (currentVisualizerMode.equals("ORB", ignoreCase = true)) {
+                        appSettings.floatingOrbSizeDp = newSize
+                    } else {
+                        appSettings.floatingAvatarSizeDp = newSize
+                    }
+                }
+                override fun onStartTrackingTouch(seekBar: android.widget.SeekBar?) {}
+                override fun onStopTrackingTouch(seekBar: android.widget.SeekBar?) {}
+            })
+        }
+        sliderContainer.addView(sizeSeekBar)
+        menuLayout.addView(sliderContainer)
+
+        menuLayout.addView(createButton("⏸ Pause Soltini", false, true) {
+            val voice = voiceService ?: com.soltini.app.services.BackgroundVoiceService.getInstance()
+            if (voice != null) {
+                voice.pauseApp()
+            } else {
+                try {
+                    val pauseIntent = Intent(this@OverlayService, com.soltini.app.services.BackgroundVoiceService::class.java).apply {
+                        action = com.soltini.app.services.BackgroundVoiceService.ACTION_PAUSE_APP
+                    }
+                    startService(pauseIntent)
+                } catch (_: Exception) {}
+                stopSelf()
+            }
+        })
 
         val menuParams = FrameLayout.LayoutParams(
-            (240 * resources.displayMetrics.density).toInt(),
+            (260 * resources.displayMetrics.density).toInt(),
             FrameLayout.LayoutParams.WRAP_CONTENT
         ).apply {
             gravity = Gravity.CENTER

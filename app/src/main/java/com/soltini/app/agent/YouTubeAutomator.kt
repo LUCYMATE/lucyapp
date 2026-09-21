@@ -148,7 +148,13 @@ class YouTubeAutomator(private val context: Context) {
      *
      * @param seconds how many seconds to seek (positive = forward, negative = backward)
      */
-    fun seek(seconds: Int): JSONObject {
+    /**
+     * Seeks forward by tapping the fast-forward region (double-tap right side of video).
+     * For custom durations, we use the +10s / -10s button via accessibility.
+     *
+     * @param seconds how many seconds to seek (positive = forward, negative = backward)
+     */
+    suspend fun seek(seconds: Int): JSONObject {
         val svc = SoltiniAccessibilityService.getInstance()
             ?: return error("Accessibility Service not active")
 
@@ -167,9 +173,9 @@ class YouTubeAutomator(private val context: Context) {
 
         repeat(taps.coerceAtMost(5)) { // Max 5 taps (50s)
             svc.tapAt(tapX, tapY)
-            Thread.sleep(150)
+            kotlinx.coroutines.delay(150)
             svc.tapAt(tapX, tapY) // Double-tap
-            Thread.sleep(200)
+            kotlinx.coroutines.delay(200)
         }
 
         val direction = if (forward) "forward" else "backward"
@@ -208,7 +214,7 @@ class YouTubeAutomator(private val context: Context) {
     /**
      * Clicks the "Skip Ad" button if a skippable ad is playing.
      */
-    fun skipAd(): JSONObject {
+    suspend fun skipAd(): JSONObject {
         val svc = SoltiniAccessibilityService.getInstance()
             ?: return error("Accessibility Service not active")
 
@@ -219,7 +225,7 @@ class YouTubeAutomator(private val context: Context) {
                     return result("status", "ad_skipped")
                 }
             }
-            Thread.sleep(500)
+            kotlinx.coroutines.delay(500)
         }
         return error("No skippable ad found — the ad may not be skippable yet or there is no ad playing")
     }
@@ -228,14 +234,14 @@ class YouTubeAutomator(private val context: Context) {
      * Opens the quality settings menu and selects the requested quality.
      * @param quality e.g. "1080p", "720p", "480p", "Auto"
      */
-    fun setQuality(quality: String): JSONObject {
+    suspend fun setQuality(quality: String): JSONObject {
         val svc = SoltiniAccessibilityService.getInstance()
             ?: return error("Accessibility Service not active")
 
         // First, tap the video to show controls
         val screen = context.resources.displayMetrics
         svc.tapAt(screen.widthPixels / 2f, screen.heightPixels / 2f)
-        Thread.sleep(400)
+        kotlinx.coroutines.delay(400)
 
         // Click the overflow / more options button
         var opened = false
@@ -243,13 +249,13 @@ class YouTubeAutomator(private val context: Context) {
             if (svc.clickByText(label)) { opened = true; break }
         }
         if (!opened) return error("Could not open YouTube settings menu — tap the video first to show controls")
-        Thread.sleep(500)
+        kotlinx.coroutines.delay(500)
 
         // Click "Quality" option in the menu
         if (!svc.clickByText("Quality")) {
             return error("Quality option not found in menu")
         }
-        Thread.sleep(400)
+        kotlinx.coroutines.delay(400)
 
         // Click the requested quality
         if (svc.clickByText(quality)) {
@@ -270,14 +276,14 @@ class YouTubeAutomator(private val context: Context) {
     /**
      * Toggles fullscreen mode by clicking the fullscreen button.
      */
-    fun toggleFullscreen(): JSONObject {
+    suspend fun toggleFullscreen(): JSONObject {
         val svc = SoltiniAccessibilityService.getInstance()
             ?: return error("Accessibility Service not active")
 
         // Show player controls first
         val screen = context.resources.displayMetrics
         svc.tapAt(screen.widthPixels / 2f, screen.heightPixels / 2f)
-        Thread.sleep(300)
+        kotlinx.coroutines.delay(300)
 
         return clickOneOf(svc, FULLSCREEN_LABELS, "Fullscreen button")
     }
@@ -285,14 +291,14 @@ class YouTubeAutomator(private val context: Context) {
     /**
      * Toggles closed captions / subtitles.
      */
-    fun toggleCaptions(): JSONObject {
+    suspend fun toggleCaptions(): JSONObject {
         val svc = SoltiniAccessibilityService.getInstance()
             ?: return error("Accessibility Service not active")
 
         // Show player controls first
         val screen = context.resources.displayMetrics
         svc.tapAt(screen.widthPixels / 2f, screen.heightPixels / 2f)
-        Thread.sleep(300)
+        kotlinx.coroutines.delay(300)
 
         return clickOneOf(svc, CAPTIONS_LABELS, "Captions button")
     }

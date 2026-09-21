@@ -26,6 +26,9 @@ class ReelsAutomator(private val context: Context) {
     fun nextReel(): JSONObject {
         val svc = SoltiniAccessibilityService.getInstance()
             ?: return error("Accessibility Service not active")
+        if (svc.isUserInteractingManually()) {
+            return result("status", "user_active_backoff", "message", "User is currently interacting manually with the screen.")
+        }
 
         val screen = context.resources.displayMetrics
         val centerX = screen.widthPixels / 2f
@@ -45,6 +48,9 @@ class ReelsAutomator(private val context: Context) {
     fun previousReel(): JSONObject {
         val svc = SoltiniAccessibilityService.getInstance()
             ?: return error("Accessibility Service not active")
+        if (svc.isUserInteractingManually()) {
+            return result("status", "user_active_backoff", "message", "User is currently interacting manually with the screen.")
+        }
 
         val screen = context.resources.displayMetrics
         val centerX = screen.widthPixels / 2f

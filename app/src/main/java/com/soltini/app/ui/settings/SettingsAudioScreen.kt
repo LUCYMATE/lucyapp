@@ -1,4 +1,4 @@
-﻿package com.soltini.app.ui.settings
+package com.soltini.app.ui.settings
 
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
@@ -24,7 +24,7 @@ fun SettingsAudioScreen(viewModel: MainViewModel?) {
     var vadSens by remember { mutableStateOf(viewModel?.appSettings?.vadSensitivity ?: AppSettings.SENSITIVITY_BALANCED) }
     var autoSleep by remember { mutableStateOf(viewModel?.appSettings?.autoSleepMinutes ?: 3) }
     var isScreenRecMode by remember { mutableStateOf(viewModel?.appSettings?.isScreenRecordingModeEnabled ?: false) }
-    var audioSource by remember { mutableStateOf(viewModel?.appSettings?.audioSource ?: "MIC") }
+    var audioSource by remember { mutableStateOf(viewModel?.appSettings?.audioSource ?: "VOICE_COMMUNICATION") }
 
     Column(
         modifier = Modifier
@@ -49,10 +49,10 @@ fun SettingsAudioScreen(viewModel: MainViewModel?) {
             SettingsDropdownRow(
                 icon = Icons.Default.Mic,
                 title = "Audio Source",
-                selectedOption = if (audioSource == "MIC") "Raw Mic (Low Latency)" else "Voice Communication (Echo Cancel)",
-                options = listOf("Raw Mic (Low Latency)", "Voice Communication (Echo Cancel)"),
+                selectedOption = if (audioSource == "VOICE_COMMUNICATION") "Voice Comm (AEC)" else "Raw Mic",
+                options = listOf("Voice Communication (Echo Cancel & Safe)", "Raw Mic (Low Latency)"),
                 onOptionSelected = { 
-                    val src = if (it.startsWith("Raw")) "MIC" else "VOICE_COMMUNICATION"
+                    val src = if (it.startsWith("Voice")) "VOICE_COMMUNICATION" else "MIC"
                     audioSource = src
                     viewModel?.appSettings?.audioSource = src
                 }

@@ -39,13 +39,13 @@ class BankingModeTileService : TileService() {
 
         if (isPaused) {
             tile.state = Tile.STATE_INACTIVE
-            tile.label = "Soltini: Paused"
+            tile.label = "LUCY: Paused"
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
                 tile.subtitle = "Banking Mode ON"
             }
         } else {
             tile.state = Tile.STATE_ACTIVE
-            tile.label = "Soltini: Active"
+            tile.label = "LUCY: Active"
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
                 tile.subtitle = "Overlay Active"
             }

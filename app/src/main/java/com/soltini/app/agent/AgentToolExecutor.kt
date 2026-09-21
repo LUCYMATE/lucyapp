@@ -12,18 +12,19 @@ import android.telephony.SmsManager
 import android.util.Log
 import com.soltini.app.automation.SoltiniNotificationListener
 import com.soltini.app.core.ReminderReceiver
-import com.soltini.app.services.ScreenCaptureManager
 import com.soltini.app.termux.TermuxResultReceiver
 import com.soltini.app.ui.UnlockActivity
 import com.soltini.app.util.AppLogger
-import kotlinx.coroutines.runBlocking
 import java.io.ByteArrayOutputStream
-import java.util.concurrent.CountDownLatch
-import java.util.concurrent.TimeUnit
+import kotlinx.coroutines.suspendCancellableCoroutine
+import kotlinx.coroutines.withTimeoutOrNull
+import kotlin.coroutines.resume
 import org.json.JSONArray
 import org.json.JSONObject
+import android.hardware.camera2.CameraCharacteristics
 import android.hardware.camera2.CameraManager
 import android.media.AudioManager
+import android.provider.MediaStore
 import android.provider.Settings
 import android.net.wifi.WifiManager
 import android.bluetooth.BluetoothAdapter
@@ -47,6 +48,40 @@ class AgentToolExecutor(private val context: Context) {
 
     companion object {
         private const val TAG = "AgentToolExecutor"
+
+        val SUPPORTED_TOOLS = setOf(
+            "open_app", "lock_device", "wake_device", "unlock_and_wake", "sleep_agent",
+            "press_back", "press_home", "press_recents", "see_screen", "read_screen",
+            "read_compact_screen", "take_screenshot", "take_screenshot_vision",
+            "click_element", "tap_screen", "swipe_screen", "type_text", "clear_text",
+            "scroll_down", "scroll_up", "read_notifications", "reply_to_notification",
+            "make_phone_call", "send_sms", "run_macro", "get_available_macros",
+            "toggle_flashlight", "set_brightness", "set_volume", "toggle_wifi",
+            "toggle_bluetooth", "get_location", "answer_call", "decline_call",
+            "read_call_log", "read_contacts", "set_alarm", "set_do_not_disturb",
+            "open_google_maps", "schedule_reminder", "run_termux_command",
+            "youtube_search", "youtube_open_video", "youtube_play_pause", "youtube_seek",
+            "youtube_next", "youtube_previous", "youtube_like", "youtube_dislike",
+            "youtube_subscribe", "youtube_skip_ad", "youtube_set_quality",
+            "youtube_fullscreen", "youtube_captions", "youtube_mute", "read_youtube_screen",
+            "whatsapp_send_message", "whatsapp_call", "next_reel", "previous_reel"
+        )
+    }
+
+    @Volatile
+    private var isTorchActive: Boolean = false
+
+    init {
+        try {
+            val cm = context.getSystemService(Context.CAMERA_SERVICE) as? CameraManager
+            cm?.registerTorchCallback(object : CameraManager.TorchCallback() {
+                override fun onTorchModeChanged(cameraId: String, enabled: Boolean) {
+                    isTorchActive = enabled
+                }
+            }, null)
+        } catch (e: Exception) {
+            AppLogger.w(TAG, "Could not register torch callback: ${e.message}")
+        }
     }
 
     private val youtubeAutomator = YouTubeAutomator(context)
@@ -57,7 +92,7 @@ class AgentToolExecutor(private val context: Context) {
      * Main dispatch function. Returns a JSONObject result sent back to Gemini
      * as a toolResponse so it can verbally confirm what happened.
      */
-    fun execute(toolName: String, args: JSONObject): JSONObject {
+    suspend fun execute(toolName: String, args: JSONObject): JSONObject {
         Log.i(TAG, "Executing tool: $toolName | args: $args")
         return when (toolName) {
             // ── Device Control & Screen Wake ──────────────────────────────
@@ -109,9 +144,9 @@ class AgentToolExecutor(private val context: Context) {
             "get_available_macros" -> getAvailableMacros()
 
             // ── System & Device Tools ─────────────────────────────────────────
-            "toggle_flashlight"    -> toggleFlashlight(args.optBoolean("on", true))
-            "set_brightness"       -> setBrightness(args.optInt("level", 50))
-            "set_volume"           -> setVolume(args.optInt("level", 50))
+            "toggle_flashlight"    -> toggleFlashlight(if (args.has("on")) args.optBoolean("on") else null)
+            "set_brightness"       -> setBrightness(if (args.has("level")) args.optInt("level") else null, args.optString("action").ifBlank { null })
+            "set_volume"           -> setVolume(if (args.has("level")) args.optInt("level") else null, args.optString("action").ifBlank { null })
             "toggle_wifi"          -> toggleWifi(args.optBoolean("on", true))
             "toggle_bluetooth"     -> toggleBluetooth(args.optBoolean("on", true))
             "get_location"         -> getLocation()
@@ -169,21 +204,103 @@ class AgentToolExecutor(private val context: Context) {
     // ─── Device Control ───────────────────────────────────────────────────────
 
     fun openApp(appName: String): JSONObject {
-        if (appName.isBlank()) return error("app_name is required")
+        if (appName.isBlank()) return error("App name is required to open an app.")
 
         val pm: PackageManager = context.packageManager
         val query = appName.lowercase().trim()
-        val match = pm.getInstalledApplications(PackageManager.GET_META_DATA).firstOrNull {
+
+        // 1. Direct system intent aliases for standard Android utilities
+        when (query) {
+            "camera" -> {
+                try {
+                    val intent = Intent(MediaStore.INTENT_ACTION_STILL_IMAGE_CAMERA).apply {
+                        flags = Intent.FLAG_ACTIVITY_NEW_TASK
+                    }
+                    context.startActivity(intent)
+                    return result("status", "success", "message", "Opened Camera.", "app", "Camera")
+                } catch (e: Exception) {
+                    // Fallthrough to package search
+                }
+            }
+            "settings" -> {
+                try {
+                    val intent = Intent(Settings.ACTION_SETTINGS).apply {
+                        flags = Intent.FLAG_ACTIVITY_NEW_TASK
+                    }
+                    context.startActivity(intent)
+                    return result("status", "success", "message", "Opened Settings.", "app", "Settings")
+                } catch (e: Exception) {
+                    // Fallthrough
+                }
+            }
+            "clock", "alarm" -> {
+                try {
+                    val intent = Intent(AlarmClock.ACTION_SHOW_ALARMS).apply {
+                        flags = Intent.FLAG_ACTIVITY_NEW_TASK
+                    }
+                    context.startActivity(intent)
+                    return result("status", "success", "message", "Opened Clock.", "app", "Clock")
+                } catch (e: Exception) {
+                    // Fallthrough
+                }
+            }
+            "dialer", "phone" -> {
+                try {
+                    val intent = Intent(Intent.ACTION_DIAL).apply {
+                        flags = Intent.FLAG_ACTIVITY_NEW_TASK
+                    }
+                    context.startActivity(intent)
+                    return result("status", "success", "message", "Opened Phone Dialer.", "app", "Phone")
+                } catch (e: Exception) {
+                    // Fallthrough
+                }
+            }
+        }
+
+        // 2. Query actual launchable apps from the app drawer
+        val launcherIntent = Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_LAUNCHER)
+        val resolveInfos = pm.queryIntentActivities(launcherIntent, 0)
+
+        // Try exact match first
+        val exactMatch = resolveInfos.firstOrNull {
+            it.loadLabel(pm).toString().trim().equals(query, ignoreCase = true)
+        }
+        // Then prefix or word match
+        val partialMatch = exactMatch ?: resolveInfos.firstOrNull {
+            val label = it.loadLabel(pm).toString().lowercase()
+            label.contains(query) || query.contains(label) || it.activityInfo.packageName.lowercase().contains(query)
+        }
+
+        if (partialMatch != null) {
+            val pkg = partialMatch.activityInfo.packageName
+            val launchIntent = pm.getLaunchIntentForPackage(pkg)
+            if (launchIntent != null) {
+                launchIntent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                context.startActivity(launchIntent)
+                val appLabel = partialMatch.loadLabel(pm).toString()
+                return result("status", "success", "message", "Opened $appLabel.", "app", appLabel, "package", pkg)
+            }
+        }
+
+        // 3. Fallback to installed applications (including system apps with launch intents)
+        val installedApps = pm.getInstalledApplications(PackageManager.GET_META_DATA)
+        val match = installedApps.firstOrNull {
             val label = pm.getApplicationLabel(it).toString().lowercase()
-            label.contains(query) || query.contains(label)
-        } ?: return error("No app found matching: $appName")
+            (label.contains(query) || query.contains(label) || it.packageName.lowercase().contains(query)) &&
+                pm.getLaunchIntentForPackage(it.packageName) != null
+        }
 
-        val launchIntent = pm.getLaunchIntentForPackage(match.packageName)
-            ?: return error("App found (${match.packageName}) but cannot be launched")
+        if (match != null) {
+            val launchIntent = pm.getLaunchIntentForPackage(match.packageName)
+            if (launchIntent != null) {
+                launchIntent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                context.startActivity(launchIntent)
+                val label = pm.getApplicationLabel(match).toString()
+                return result("status", "success", "message", "Opened $label.", "app", label, "package", match.packageName)
+            }
+        }
 
-        launchIntent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-        context.startActivity(launchIntent)
-        return result("status", "opened", "app", pm.getApplicationLabel(match).toString())
+        return error("I couldn't find an app named '$appName' on your device. Please check if it is installed.")
     }
 
     private fun wakeDevice(): JSONObject {
@@ -196,66 +313,78 @@ class AgentToolExecutor(private val context: Context) {
             )
             wl.acquire(3000L)
             wl.release()
-            result("status", "screen_on")
+            result("status", "success", "message", "Screen woke up.")
         } catch (e: Exception) {
-            error(e.message ?: "Failed to wake device")
+            error("Failed to wake device: ${e.message ?: "Unknown error"}")
         }
     }
 
-    private fun unlockAndWake(): JSONObject {
-        val success = runBlocking {
-            UnlockActivity.requestUnlockAndWake(context)
-        }
+    private suspend fun unlockAndWake(): JSONObject {
+        val success = UnlockActivity.requestUnlockAndWake(context)
         return if (success) {
-            result("status", "unlocked_and_awake")
+            result("status", "success", "message", "Device unlocked and screen woke up.")
         } else {
-            error("Could not unlock screen or keyguard")
+            error("Could not unlock screen or keyguard. Please unlock the device manually.")
         }
     }
 
     // ─── Screen Automation & Vision (Dual-Track Perception Engine) ───────────
 
-    private fun seeScreen(includeScreenshot: Boolean = true): JSONObject {
+    private suspend fun seeScreen(includeScreenshot: Boolean = true): JSONObject {
         val svc = SoltiniAccessibilityService.getInstance()
-        val wireframe = svc?.readScreen() ?: "Accessibility Service not active"
+        val wireframe = svc?.readScreen()
 
         var screenshotBase64: String? = null
         if (includeScreenshot) {
-            // 1. Direct AccessibilityService screenshot (Android 11+, zero popups, instant)
+            // Direct AccessibilityService screenshot (Android 11+, zero popups, instant)
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R && svc != null) {
-                val latch = CountDownLatch(1)
-                var capturedBitmap: Bitmap? = null
                 try {
-                    svc.takeScreenshotDirectly { bmp ->
-                        capturedBitmap = bmp
-                        latch.countDown()
+                    val capturedBitmap = withTimeoutOrNull(2500L) {
+                        suspendCancellableCoroutine<Bitmap?> { cont ->
+                            svc.takeScreenshotDirectly { bmp ->
+                                if (cont.isActive) cont.resume(bmp)
+                            }
+                        }
                     }
-                    latch.await(1500, TimeUnit.MILLISECONDS)
                     if (capturedBitmap != null) {
-                        screenshotBase64 = bitmapToBase64Jpeg(capturedBitmap!!)
+                        val scaledBitmap = scaleBitmapDown(capturedBitmap, maxDimension = 1024)
+                        screenshotBase64 = bitmapToBase64Jpeg(scaledBitmap)
+                        if (scaledBitmap != capturedBitmap) {
+                            capturedBitmap.recycle()
+                        }
+                        scaledBitmap.recycle()
                     }
                 } catch (e: Exception) {
                     AppLogger.w(TAG, "Direct a11y screenshot failed: ${e.message}")
                 }
             }
+        }
 
-            // 2. Fallback to ScreenCaptureManager if needed
-            if (screenshotBase64 == null) {
-                screenshotBase64 = runBlocking {
-                    ScreenCaptureManager.captureScreenshotBase64(context, quality = 75)
-                }
-            }
+        if (wireframe == null && screenshotBase64 == null) {
+            return error("Cannot inspect screen: Soltini Accessibility Service is not active. Please enable Soltini in Settings > Accessibility.")
         }
 
         return JSONObject().apply {
-            put("status", "ok")
-            put("screen_wireframe", wireframe)
-            put("screen_content", wireframe) // compatibility alias
+            put("status", "success")
+            put("message", "Screen inspected successfully.")
+            put("screen_wireframe", wireframe ?: "Visual screenshot captured")
+            put("screen_content", wireframe ?: "Visual screenshot captured")
             if (screenshotBase64 != null) {
                 put("image_base64", screenshotBase64)
                 put("format", "image/jpeg")
             }
         }
+    }
+
+    private fun scaleBitmapDown(bitmap: Bitmap, maxDimension: Int = 1024): Bitmap {
+        val width = bitmap.width
+        val height = bitmap.height
+        if (width <= maxDimension && height <= maxDimension) return bitmap
+
+        val scale = maxDimension.toFloat() / Math.max(width, height).toFloat()
+        val targetWidth = (width * scale).toInt()
+        val targetHeight = (height * scale).toInt()
+        return Bitmap.createScaledBitmap(bitmap, targetWidth, targetHeight, true)
     }
 
     private fun bitmapToBase64Jpeg(bitmap: Bitmap, quality: Int = 75): String {
@@ -267,54 +396,67 @@ class AgentToolExecutor(private val context: Context) {
 
     private fun readCompactScreen(maxNodes: Int): JSONObject {
         val svc = SoltiniAccessibilityService.getInstance()
-            ?: return error("Accessibility Service not active")
+            ?: return error("Cannot read screen: Soltini Accessibility Service is not active. Please enable Soltini in Settings > Accessibility.")
         val compactState = svc.dumpCompactScreenState(maxNodes)
         return JSONObject().apply {
-            put("status", "ok")
+            put("status", "success")
+            put("message", "Screen hierarchy read successfully.")
             put("compact_screen", compactState)
         }
     }
 
     private fun clickElement(text: String): JSONObject {
-        if (text.isBlank()) return error("text is required")
+        if (text.isBlank()) return error("Element text or label is required to click.")
         val svc = SoltiniAccessibilityService.getInstance()
-            ?: return error("Accessibility Service not active")
+            ?: return error("Cannot click '$text' because Soltini Accessibility Service is disabled. Please enable it in Settings > Accessibility.")
+        if (svc.isUserInteractingManually()) {
+            return result("status", "user_active_backoff", "message", "User is currently interacting manually with the screen. Action paused to prevent disruption.")
+        }
         return if (svc.clickByText(text)) {
-            result("status", "clicked", "element", text)
+            result("status", "success", "message", "Clicked on '$text'.", "element", text)
         } else {
-            error("No clickable element found matching: $text")
+            error("No clickable element matching '$text' was found on the screen.")
         }
     }
 
     private fun tapScreen(x: Float, y: Float): JSONObject {
-        if (x < 0 || y < 0) return error("x and y coordinates are required")
+        if (x < 0 || y < 0) return error("Screen coordinates (x, y) are required to tap.")
         val svc = SoltiniAccessibilityService.getInstance()
-            ?: return error("Accessibility Service not active")
+            ?: return error("Cannot tap screen because Soltini Accessibility Service is disabled. Please enable it in Settings > Accessibility.")
+        if (svc.isUserInteractingManually()) {
+            return result("status", "user_active_backoff", "message", "User is currently interacting manually with the screen. Action paused to prevent disruption.")
+        }
         return if (svc.tapAt(x, y)) {
-            result("status", "tapped", "x", x.toString(), "y", y.toString())
+            result("status", "success", "message", "Tapped at coordinates ($x, $y).", "x", x.toString(), "y", y.toString())
         } else {
-            error("Tap gesture failed — requires Android 7+ and gesture permission")
+            error("Tap gesture failed. Please verify Accessibility Service permissions.")
         }
     }
 
     private fun swipeScreen(x1: Float, y1: Float, x2: Float, y2: Float, durationMs: Long): JSONObject {
         val svc = SoltiniAccessibilityService.getInstance()
-            ?: return error("Accessibility Service not active")
+            ?: return error("Cannot swipe screen because Soltini Accessibility Service is disabled. Please enable it in Settings > Accessibility.")
+        if (svc.isUserInteractingManually()) {
+            return result("status", "user_active_backoff", "message", "User is currently interacting manually with the screen. Action paused to prevent disruption.")
+        }
         return if (svc.swipe(x1, y1, x2, y2, durationMs)) {
-            result("status", "swiped")
+            result("status", "success", "message", "Swiped screen successfully.")
         } else {
-            error("Swipe gesture failed")
+            error("Swipe gesture failed. Please verify Accessibility Service permissions.")
         }
     }
 
     private fun typeText(text: String): JSONObject {
-        if (text.isBlank()) return error("text is required")
+        if (text.isBlank()) return error("Text to type is required.")
         val svc = SoltiniAccessibilityService.getInstance()
-            ?: return error("Accessibility Service not active")
+            ?: return error("Cannot type text because Soltini Accessibility Service is disabled. Please enable it in Settings > Accessibility.")
+        if (svc.isUserInteractingManually()) {
+            return result("status", "user_active_backoff", "message", "User is currently interacting manually with the screen. Action paused to prevent disruption.")
+        }
         return if (svc.typeText(text)) {
-            result("status", "typed", "text", text)
+            result("status", "success", "message", "Typed '$text' into the focused field.", "text", text)
         } else {
-            error("No editable text field found on screen. Please tap a text field first.")
+            error("No editable text field is currently focused. Please tap an input field first.")
         }
     }
 
@@ -375,39 +517,71 @@ class AgentToolExecutor(private val context: Context) {
             }
         }
 
+        val cleanNumber = numberToCall.replace(Regex("[^0-9+*#]"), "")
+        if (cleanNumber.isBlank() && numberToCall.all { !it.isDigit() }) {
+            return error("Could not find a valid phone number for '$target'.")
+        }
+
         return try {
-            val intent = Intent(Intent.ACTION_CALL, Uri.parse("tel:${Uri.encode(numberToCall)}")).apply {
-                flags = Intent.FLAG_ACTIVITY_NEW_TASK
-            }
-            context.startActivity(intent)
-            result("status", "calling", "number", numberToCall, "target", target)
-        } catch (e: Exception) {
-            try {
+            if (androidx.core.app.ActivityCompat.checkSelfPermission(context, android.Manifest.permission.CALL_PHONE) == PackageManager.PERMISSION_GRANTED) {
+                val intent = Intent(Intent.ACTION_CALL, Uri.parse("tel:${Uri.encode(numberToCall)}")).apply {
+                    flags = Intent.FLAG_ACTIVITY_NEW_TASK
+                }
+                context.startActivity(intent)
+                result("status", "success", "message", "Calling $target now.", "number", numberToCall)
+            } else {
                 val dialIntent = Intent(Intent.ACTION_DIAL, Uri.parse("tel:${Uri.encode(numberToCall)}")).apply {
                     flags = Intent.FLAG_ACTIVITY_NEW_TASK
                 }
                 context.startActivity(dialIntent)
-                result("status", "dialer_opened", "number", numberToCall, "target", target)
-            } catch (ex: Exception) {
-                error("Failed to make phone call: ${ex.message}")
+                result("status", "success", "message", "Opened dialer for $target because direct call permission is not granted.", "number", numberToCall)
             }
+        } catch (e: Exception) {
+            AppLogger.e(TAG, "Failed to make phone call", e)
+            error("Failed to place call to '$target': ${e.message ?: "Unknown telephony error"}")
         }
     }
 
     private fun sendSms(number: String, message: String): JSONObject {
-        if (number.isBlank() || message.isBlank()) return error("phone_number and message are required")
+        if (number.isBlank()) return error("Recipient phone number or contact is required to send an SMS.")
+        if (message.isBlank()) return error("Message text cannot be empty.")
+
+        var targetNumber = number.trim()
+        if (targetNumber.any { it.isLetter() }) {
+            val contactsResult = readContacts(targetNumber)
+            val contactsArr = contactsResult.optJSONArray("contacts")
+            if (contactsArr != null && contactsArr.length() > 0) {
+                targetNumber = contactsArr.getJSONObject(0).optString("number", targetNumber)
+            }
+        }
+
         return try {
-            val smsManager = context.getSystemService(SmsManager::class.java)
-            smsManager.sendTextMessage(number, null, message, null, null)
-            result("status", "sms_sent", "number", number, "message", message)
+            if (androidx.core.app.ActivityCompat.checkSelfPermission(context, android.Manifest.permission.SEND_SMS) == PackageManager.PERMISSION_GRANTED) {
+                val smsManager = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                    context.getSystemService(SmsManager::class.java)
+                } else {
+                    @Suppress("DEPRECATION")
+                    SmsManager.getDefault()
+                }
+                smsManager.sendTextMessage(targetNumber, null, message, null, null)
+                result("status", "success", "message", "SMS sent successfully to $number.", "number", targetNumber)
+            } else {
+                val smsIntent = Intent(Intent.ACTION_SENDTO, Uri.parse("smsto:${Uri.encode(targetNumber)}")).apply {
+                    putExtra("sms_body", message)
+                    flags = Intent.FLAG_ACTIVITY_NEW_TASK
+                }
+                context.startActivity(smsIntent)
+                result("status", "success", "message", "Opened messaging app to send your SMS because SMS permission is not granted.", "number", targetNumber)
+            }
         } catch (e: Exception) {
-            error("Failed to send SMS: ${e.message}")
+            AppLogger.e(TAG, "Failed to send SMS", e)
+            error("Failed to send SMS: ${e.message ?: "Unknown SMS error"}")
         }
     }
 
     // ─── Declarative Macros ───────────────────────────────────────────────────
 
-    private fun runMacro(macroName: String, paramsObj: JSONObject?): JSONObject {
+    private suspend fun runMacro(macroName: String, paramsObj: JSONObject?): JSONObject {
         if (macroName.isBlank()) return error("macro_name is required")
         val paramMap = mutableMapOf<String, String>()
         if (paramsObj != null) {
@@ -419,9 +593,7 @@ class AgentToolExecutor(private val context: Context) {
         }
 
         val a11y = SoltiniAccessibilityService.getInstance()
-        val resultMessage = runBlocking {
-            MacroRunner.executeMacro(context, macroName, paramMap, a11y, this@AgentToolExecutor)
-        }
+        val resultMessage = MacroRunner.executeMacro(context, macroName, paramMap, a11y, this@AgentToolExecutor)
 
         return JSONObject().apply {
             put("status", if (resultMessage.startsWith("Error")) "error" else "ok")
@@ -453,7 +625,7 @@ class AgentToolExecutor(private val context: Context) {
         }
     }
 
-    private fun runTermuxCommand(executable: String, argsArray: JSONArray?): JSONObject {
+    private suspend fun runTermuxCommand(executable: String, argsArray: JSONArray?): JSONObject {
         if (executable.isBlank()) return error("command is required")
         val argsList = mutableListOf<String>()
         if (argsArray != null) {
@@ -462,13 +634,11 @@ class AgentToolExecutor(private val context: Context) {
             }
         }
 
-        val res = runBlocking {
-            TermuxResultReceiver.runTermuxCommand(
-                context,
-                executable,
-                argsList.toTypedArray()
-            )
-        }
+        val res = TermuxResultReceiver.runTermuxCommand(
+            context,
+            executable,
+            argsList.toTypedArray()
+        )
 
         return JSONObject().apply {
             put("status", if (res.exitCode == 0) "ok" else "failed")
@@ -481,165 +651,309 @@ class AgentToolExecutor(private val context: Context) {
 
     // ── System & Device Tools (Injected) ───────────────────────────────────
 
-    private fun toggleFlashlight(on: Boolean): JSONObject {
+    private fun toggleFlashlight(on: Boolean? = null): JSONObject {
         return try {
-            val cameraManager = context.getSystemService(Context.CAMERA_SERVICE) as android.hardware.camera2.CameraManager
-            val cameraId = cameraManager.cameraIdList[0]
-            cameraManager.setTorchMode(cameraId, on)
-            result("status", "ok", "flashlight", if (on) "on" else "off")
-        } catch (e: Exception) {
-            error("Failed to toggle flashlight: ${e.message}")
-        }
-    }
+            val cameraManager = context.getSystemService(Context.CAMERA_SERVICE) as? CameraManager
+                ?: return error("Camera service is not available on this device.")
 
-    private fun setBrightness(level: Int): JSONObject {
-        return try {
-            if (android.provider.Settings.System.canWrite(context)) {
-                val clamped = level.coerceIn(0, 255)
-                android.provider.Settings.System.putInt(
-                    context.contentResolver,
-                    android.provider.Settings.System.SCREEN_BRIGHTNESS,
-                    clamped
-                )
-                result("status", "ok", "brightness", clamped)
-            } else {
-                error("Missing WRITE_SETTINGS permission to adjust brightness.")
+            val ids = cameraManager.cameraIdList
+            if (ids.isEmpty()) {
+                return error("No camera hardware found on this device.")
             }
+
+            // Find a camera with flash, prioritizing back-facing camera
+            var torchCameraId: String? = null
+            for (id in ids) {
+                try {
+                    val characteristics = cameraManager.getCameraCharacteristics(id)
+                    val flashAvailable = characteristics.get(CameraCharacteristics.FLASH_INFO_AVAILABLE) == true
+                    val facing = characteristics.get(CameraCharacteristics.LENS_FACING)
+                    if (flashAvailable && facing == CameraCharacteristics.LENS_FACING_BACK) {
+                        torchCameraId = id
+                        break
+                    }
+                } catch (e: Exception) {
+                    AppLogger.w(TAG, "Error checking camera $id: ${e.message}")
+                }
+            }
+
+            // If no back camera with flash found, check any camera with flash
+            if (torchCameraId == null) {
+                for (id in ids) {
+                    try {
+                        val characteristics = cameraManager.getCameraCharacteristics(id)
+                        if (characteristics.get(CameraCharacteristics.FLASH_INFO_AVAILABLE) == true) {
+                            torchCameraId = id
+                            break
+                        }
+                    } catch (e: Exception) {
+                        // ignore
+                    }
+                }
+            }
+
+            if (torchCameraId == null) {
+                return error("No flashlight or torch hardware unit was found on this device.")
+            }
+
+            val targetState = on ?: !isTorchActive
+            cameraManager.setTorchMode(torchCameraId, targetState)
+            isTorchActive = targetState
+
+            val stateText = if (targetState) "turned on" else "turned off"
+            result("status", "success", "message", "The flashlight has been $stateText.", "flashlight", if (targetState) "on" else "off")
+        } catch (e: android.hardware.camera2.CameraAccessException) {
+            AppLogger.e(TAG, "CameraAccessException in toggleFlashlight", e)
+            error("Cannot control flashlight: Camera is currently in use by another app or camera access is restricted.")
+        } catch (e: SecurityException) {
+            AppLogger.e(TAG, "SecurityException in toggleFlashlight", e)
+            error("Camera permission is required to control the flashlight. Please grant Camera permission in Settings.")
         } catch (e: Exception) {
-            error("Failed to set brightness: ${e.message}")
+            AppLogger.e(TAG, "Exception in toggleFlashlight", e)
+            error("Failed to toggle flashlight: ${e.message ?: "Unknown camera error"}")
         }
     }
 
-    private fun setVolume(level: Int): JSONObject {
+    private fun setBrightness(level: Int? = null, action: String? = null): JSONObject {
         return try {
-            val audioManager = context.getSystemService(Context.AUDIO_SERVICE) as android.media.AudioManager
-            val maxVolume = audioManager.getStreamMaxVolume(android.media.AudioManager.STREAM_MUSIC)
-            val clamped = level.coerceIn(0, maxVolume)
-            audioManager.setStreamVolume(android.media.AudioManager.STREAM_MUSIC, clamped, android.media.AudioManager.FLAG_SHOW_UI)
-            result("status", "ok", "volume", clamped)
+            if (!Settings.System.canWrite(context)) {
+                try {
+                    val intent = Intent(Settings.ACTION_MANAGE_WRITE_SETTINGS).apply {
+                        data = Uri.parse("package:${context.packageName}")
+                        flags = Intent.FLAG_ACTIVITY_NEW_TASK
+                    }
+                    context.startActivity(intent)
+                } catch (e: Exception) {
+                    // ignore
+                }
+                return error("Cannot adjust brightness because 'Modify system settings' permission is not granted. I opened the permission screen for you to allow it.")
+            }
+
+            val current = try {
+                Settings.System.getInt(context.contentResolver, Settings.System.SCREEN_BRIGHTNESS)
+            } catch (e: Exception) {
+                128
+            }
+
+            val targetValue = when {
+                action == "max" -> 255
+                action == "min" -> 5
+                action == "up" -> (current + 35).coerceAtMost(255)
+                action == "down" -> (current - 35).coerceAtLeast(5)
+                level != null -> {
+                    if (level in 0..100) {
+                        ((level / 100.0) * 255).toInt().coerceIn(5, 255)
+                    } else {
+                        level.coerceIn(5, 255)
+                    }
+                }
+                else -> current
+            }
+
+            Settings.System.putInt(
+                context.contentResolver,
+                Settings.System.SCREEN_BRIGHTNESS,
+                targetValue
+            )
+            val percent = (targetValue * 100) / 255
+            result("status", "success", "message", "Screen brightness set to $percent%.", "brightness", targetValue, "percent", percent)
         } catch (e: Exception) {
-            error("Failed to set volume: ${e.message}")
+            AppLogger.e(TAG, "Failed to set brightness", e)
+            error("Failed to set brightness: ${e.message ?: "Unknown error"}")
+        }
+    }
+
+    private fun setVolume(level: Int? = null, action: String? = null): JSONObject {
+        return try {
+            val audioManager = context.getSystemService(Context.AUDIO_SERVICE) as? AudioManager
+                ?: return error("Audio service is not available on this device.")
+
+            val stream = AudioManager.STREAM_MUSIC
+            val maxVolume = audioManager.getStreamMaxVolume(stream)
+            val currentVolume = audioManager.getStreamVolume(stream)
+
+            val newVolume = when {
+                action == "mute" -> 0
+                action == "unmute" -> (maxVolume * 0.5f).toInt().coerceAtLeast(1)
+                action == "up" -> (currentVolume + 2).coerceAtMost(maxVolume)
+                action == "down" -> (currentVolume - 2).coerceAtLeast(0)
+                level != null -> {
+                    if (level in 0..100 && level > maxVolume) {
+                        ((level / 100.0) * maxVolume).toInt().coerceIn(0, maxVolume)
+                    } else {
+                        level.coerceIn(0, maxVolume)
+                    }
+                }
+                else -> currentVolume
+            }
+
+            audioManager.setStreamVolume(stream, newVolume, AudioManager.FLAG_SHOW_UI)
+            val percent = if (maxVolume > 0) (newVolume * 100) / maxVolume else 0
+            result(
+                "status", "success",
+                "message", if (newVolume == 0) "Media volume is muted." else "Media volume set to $percent%.",
+                "volume", newVolume,
+                "percent", percent
+            )
+        } catch (e: Exception) {
+            AppLogger.e(TAG, "Failed to set volume", e)
+            error("Failed to set volume: ${e.message ?: "Unknown audio error"}")
         }
     }
 
     private fun toggleWifi(on: Boolean): JSONObject {
         return try {
-            val wifiManager = context.applicationContext.getSystemService(Context.WIFI_SERVICE) as android.net.wifi.WifiManager
-            if (android.os.Build.VERSION.SDK_INT < android.os.Build.VERSION_CODES.Q) {
+            val wifiManager = context.applicationContext.getSystemService(Context.WIFI_SERVICE) as? WifiManager
+                ?: return error("Wi-Fi service is not available on this device.")
+
+            if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) {
                 @Suppress("DEPRECATION")
                 wifiManager.isWifiEnabled = on
-                result("status", "ok", "wifi", if (on) "on" else "off")
+                result("status", "success", "message", if (on) "Wi-Fi turned on." else "Wi-Fi turned off.", "wifi", if (on) "on" else "off")
             } else {
-                val intent = Intent(android.provider.Settings.Panel.ACTION_WIFI)
-                intent.flags = Intent.FLAG_ACTIVITY_NEW_TASK
+                val intent = Intent(Settings.Panel.ACTION_WIFI).apply {
+                    flags = Intent.FLAG_ACTIVITY_NEW_TASK
+                }
                 context.startActivity(intent)
-                result("status", "pending_user_action", "message", "Opened WiFi settings panel")
+                result("status", "success", "message", "Opened the Wi-Fi panel for you to toggle it.")
             }
         } catch (e: Exception) {
-            error("Failed to toggle WiFi: ${e.message}")
+            AppLogger.e(TAG, "Failed to toggle WiFi", e)
+            error("Failed to control Wi-Fi: ${e.message ?: "Unknown error"}")
         }
     }
 
     private fun toggleBluetooth(on: Boolean): JSONObject {
         return try {
-            val bluetoothManager = context.getSystemService(Context.BLUETOOTH_SERVICE) as android.bluetooth.BluetoothManager
-            val adapter = bluetoothManager.adapter
-            if (androidx.core.app.ActivityCompat.checkSelfPermission(context, android.Manifest.permission.BLUETOOTH_CONNECT) == android.content.pm.PackageManager.PERMISSION_GRANTED) {
-                if (on) {
-                    @Suppress("DEPRECATION")
-                    adapter?.enable()
-                } else {
-                    @Suppress("DEPRECATION")
-                    adapter?.disable()
+            val bluetoothManager = context.getSystemService(Context.BLUETOOTH_SERVICE) as? BluetoothManager
+            val adapter = bluetoothManager?.adapter ?: BluetoothAdapter.getDefaultAdapter()
+                ?: return error("Bluetooth is not supported on this device.")
+
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                if (androidx.core.app.ActivityCompat.checkSelfPermission(context, android.Manifest.permission.BLUETOOTH_CONNECT) != PackageManager.PERMISSION_GRANTED) {
+                    return error("Bluetooth permission (Nearby Devices) is not granted. Please grant Nearby Devices permission in Settings.")
                 }
-                result("status", "ok", "bluetooth", if (on) "on" else "off")
+            }
+
+            @Suppress("DEPRECATION")
+            val success = if (on) adapter.enable() else adapter.disable()
+            if (success) {
+                result("status", "success", "message", if (on) "Bluetooth turned on." else "Bluetooth turned off.", "bluetooth", if (on) "on" else "off")
             } else {
-                error("Missing BLUETOOTH_CONNECT permission")
+                val intent = Intent(Settings.ACTION_BLUETOOTH_SETTINGS).apply {
+                    flags = Intent.FLAG_ACTIVITY_NEW_TASK
+                }
+                context.startActivity(intent)
+                result("status", "pending_user_action", "message", "Could not toggle Bluetooth directly. Opened Bluetooth settings.")
             }
         } catch (e: Exception) {
-            error("Failed to toggle Bluetooth: ${e.message}")
+            AppLogger.e(TAG, "Failed to toggle Bluetooth", e)
+            error("Failed to control Bluetooth: ${e.message ?: "Unknown error"}")
         }
     }
 
     private fun getLocation(): JSONObject {
         return try {
-            val locationManager = context.getSystemService(Context.LOCATION_SERVICE) as android.location.LocationManager
-            if (androidx.core.app.ActivityCompat.checkSelfPermission(context, android.Manifest.permission.ACCESS_FINE_LOCATION) == android.content.pm.PackageManager.PERMISSION_GRANTED) {
-                val provider = locationManager.getBestProvider(android.location.Criteria(), true)
-                if (provider != null) {
-                    val location = locationManager.getLastKnownLocation(provider)
-                    if (location != null) {
-                        result("status", "ok", "latitude", location.latitude, "longitude", location.longitude)
-                    } else {
-                        error("Location not available right now.")
+            val locationManager = context.getSystemService(Context.LOCATION_SERVICE) as? LocationManager
+                ?: return error("Location service is not available on this device.")
+
+            if (androidx.core.app.ActivityCompat.checkSelfPermission(context, android.Manifest.permission.ACCESS_FINE_LOCATION) != PackageManager.PERMISSION_GRANTED &&
+                androidx.core.app.ActivityCompat.checkSelfPermission(context, android.Manifest.permission.ACCESS_COARSE_LOCATION) != PackageManager.PERMISSION_GRANTED
+            ) {
+                return error("Location permission is not granted. Please grant Location permission in Settings.")
+            }
+
+            val providers = listOf(LocationManager.GPS_PROVIDER, LocationManager.NETWORK_PROVIDER, LocationManager.PASSIVE_PROVIDER)
+            var bestLocation: Location? = null
+            for (p in providers) {
+                try {
+                    val loc = locationManager.getLastKnownLocation(p)
+                    if (loc != null && (bestLocation == null || loc.accuracy < bestLocation.accuracy)) {
+                        bestLocation = loc
                     }
-                } else {
-                    error("No location provider available.")
+                } catch (e: Exception) {
+                    // ignore
                 }
+            }
+
+            if (bestLocation != null) {
+                result(
+                    "status", "success",
+                    "latitude", bestLocation.latitude,
+                    "longitude", bestLocation.longitude,
+                    "accuracy_meters", bestLocation.accuracy,
+                    "message", "Current location: ${bestLocation.latitude}, ${bestLocation.longitude} (accuracy: ${bestLocation.accuracy.toInt()}m)."
+                )
             } else {
-                error("Missing ACCESS_FINE_LOCATION permission.")
+                error("Could not determine current location. Please verify that Location/GPS is turned on in Quick Settings.")
             }
         } catch (e: Exception) {
-            error("Failed to get location: ${e.message}")
+            AppLogger.e(TAG, "Failed to get location", e)
+            error("Failed to get location: ${e.message ?: "Unknown location error"}")
         }
     }
 
     private fun answerCall(): JSONObject {
         return try {
-            val telecomManager = context.getSystemService(Context.TELECOM_SERVICE) as android.telecom.TelecomManager
-            if (androidx.core.app.ActivityCompat.checkSelfPermission(context, android.Manifest.permission.ANSWER_PHONE_CALLS) == android.content.pm.PackageManager.PERMISSION_GRANTED) {
+            val telecomManager = context.getSystemService(Context.TELECOM_SERVICE) as? TelecomManager
+                ?: return error("Telecom service is not available on this device.")
+
+            if (androidx.core.app.ActivityCompat.checkSelfPermission(context, android.Manifest.permission.ANSWER_PHONE_CALLS) == PackageManager.PERMISSION_GRANTED) {
                 @Suppress("DEPRECATION")
                 telecomManager.acceptRingingCall()
-                result("status", "ok")
+                result("status", "success", "message", "Answered phone call.")
             } else {
-                error("Missing ANSWER_PHONE_CALLS permission.")
+                error("Missing 'Answer Phone Calls' permission in Settings.")
             }
         } catch (e: Exception) {
-            error("Failed to answer call: ${e.message}")
+            AppLogger.e(TAG, "Failed to answer call", e)
+            error("Failed to answer call: ${e.message ?: "Unknown error"}")
         }
     }
 
     private fun declineCall(): JSONObject {
         return try {
-            val telecomManager = context.getSystemService(Context.TELECOM_SERVICE) as android.telecom.TelecomManager
-            if (androidx.core.app.ActivityCompat.checkSelfPermission(context, android.Manifest.permission.ANSWER_PHONE_CALLS) == android.content.pm.PackageManager.PERMISSION_GRANTED) {
-                if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.P) {
+            val telecomManager = context.getSystemService(Context.TELECOM_SERVICE) as? TelecomManager
+                ?: return error("Telecom service is not available on this device.")
+
+            if (androidx.core.app.ActivityCompat.checkSelfPermission(context, android.Manifest.permission.ANSWER_PHONE_CALLS) == PackageManager.PERMISSION_GRANTED) {
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
                     telecomManager.endCall()
-                    result("status", "ok")
+                    result("status", "success", "message", "Declined phone call.")
                 } else {
-                    error("Decline call requires Android 9+")
+                    error("Declining calls requires Android 9 (Pie) or higher.")
                 }
             } else {
-                error("Missing ANSWER_PHONE_CALLS permission.")
+                error("Missing 'Answer Phone Calls' permission in Settings.")
             }
         } catch (e: Exception) {
-            error("Failed to decline call: ${e.message}")
+            AppLogger.e(TAG, "Failed to decline call", e)
+            error("Failed to decline call: ${e.message ?: "Unknown error"}")
         }
     }
 
     private fun readCallLog(limit: Int): JSONObject {
         return try {
-            if (androidx.core.app.ActivityCompat.checkSelfPermission(context, android.Manifest.permission.READ_CALL_LOG) == android.content.pm.PackageManager.PERMISSION_GRANTED) {
+            if (androidx.core.app.ActivityCompat.checkSelfPermission(context, android.Manifest.permission.READ_CALL_LOG) == PackageManager.PERMISSION_GRANTED) {
                 val cursor = context.contentResolver.query(
-                    android.provider.CallLog.Calls.CONTENT_URI,
-                    null, null, null, android.provider.CallLog.Calls.DATE + " DESC"
+                    CallLog.Calls.CONTENT_URI,
+                    null, null, null, CallLog.Calls.DATE + " DESC"
                 )
-                val calls = org.json.JSONArray()
+                val calls = JSONArray()
                 cursor?.use {
-                    val numberIndex = it.getColumnIndex(android.provider.CallLog.Calls.NUMBER)
-                    val typeIndex = it.getColumnIndex(android.provider.CallLog.Calls.TYPE)
-                    val dateIndex = it.getColumnIndex(android.provider.CallLog.Calls.DATE)
-                    val nameIndex = it.getColumnIndex(android.provider.CallLog.Calls.CACHED_NAME)
-                    var count = 0
-                    while (it.moveToNext() && count < limit) {
+                    val numberIndex = it.getColumnIndex(CallLog.Calls.NUMBER)
+                    val typeIndex = it.getColumnIndex(CallLog.Calls.TYPE)
+                    val dateIndex = it.getColumnIndex(CallLog.Calls.DATE)
+                    val nameIndex = it.getColumnIndex(CallLog.Calls.CACHED_NAME)
+                    while (it.moveToNext() && calls.length() < limit) {
                         val number = it.getString(numberIndex)
                         val type = it.getInt(typeIndex)
                         val date = it.getLong(dateIndex)
                         val name = it.getString(nameIndex)
                         val typeStr = when (type) {
-                            android.provider.CallLog.Calls.INCOMING_TYPE -> "Incoming"
-                            android.provider.CallLog.Calls.OUTGOING_TYPE -> "Outgoing"
-                            android.provider.CallLog.Calls.MISSED_TYPE -> "Missed"
+                            CallLog.Calls.INCOMING_TYPE -> "Incoming"
+                            CallLog.Calls.OUTGOING_TYPE -> "Outgoing"
+                            CallLog.Calls.MISSED_TYPE -> "Missed"
                             else -> "Other"
                         }
                         calls.put(JSONObject().apply {
@@ -648,32 +962,32 @@ class AgentToolExecutor(private val context: Context) {
                             put("type", typeStr)
                             put("date", date)
                         })
-                        count++
                     }
                 }
-                result("status", "ok", "calls", calls)
+                result("status", "success", "message", "Retrieved ${calls.length()} recent call log entries.", "calls", calls)
             } else {
-                error("Missing READ_CALL_LOG permission.")
+                error("Missing READ_CALL_LOG permission. Please grant Call Logs permission in Settings.")
             }
         } catch (e: Exception) {
-            error("Failed to read call log: ${e.message}")
+            AppLogger.e(TAG, "Failed to read call log", e)
+            error("Failed to read call log: ${e.message ?: "Unknown error"}")
         }
     }
 
     private fun readContacts(query: String): JSONObject {
         return try {
-            if (androidx.core.app.ActivityCompat.checkSelfPermission(context, android.Manifest.permission.READ_CONTACTS) == android.content.pm.PackageManager.PERMISSION_GRANTED) {
+            if (androidx.core.app.ActivityCompat.checkSelfPermission(context, android.Manifest.permission.READ_CONTACTS) == PackageManager.PERMISSION_GRANTED) {
                 val cursor = context.contentResolver.query(
-                    android.provider.ContactsContract.CommonDataKinds.Phone.CONTENT_URI,
+                    ContactsContract.CommonDataKinds.Phone.CONTENT_URI,
                     null,
-                    "${android.provider.ContactsContract.CommonDataKinds.Phone.DISPLAY_NAME} LIKE ?",
+                    "${ContactsContract.CommonDataKinds.Phone.DISPLAY_NAME} LIKE ?",
                     arrayOf("%$query%"),
                     null
                 )
-                val contacts = org.json.JSONArray()
+                val contacts = JSONArray()
                 cursor?.use {
-                    val nameIndex = it.getColumnIndex(android.provider.ContactsContract.CommonDataKinds.Phone.DISPLAY_NAME)
-                    val numberIndex = it.getColumnIndex(android.provider.ContactsContract.CommonDataKinds.Phone.NUMBER)
+                    val nameIndex = it.getColumnIndex(ContactsContract.CommonDataKinds.Phone.DISPLAY_NAME)
+                    val numberIndex = it.getColumnIndex(ContactsContract.CommonDataKinds.Phone.NUMBER)
                     while (it.moveToNext() && contacts.length() < 10) {
                         contacts.put(JSONObject().apply {
                             put("name", it.getString(nameIndex))
@@ -681,62 +995,70 @@ class AgentToolExecutor(private val context: Context) {
                         })
                     }
                 }
-                result("status", "ok", "contacts", contacts)
+                result("status", "success", "message", "Found ${contacts.length()} contacts matching '$query'.", "contacts", contacts)
             } else {
-                error("Missing READ_CONTACTS permission.")
+                error("Missing READ_CONTACTS permission. Please grant Contacts permission in Settings.")
             }
         } catch (e: Exception) {
-            error("Failed to read contacts: ${e.message}")
+            AppLogger.e(TAG, "Failed to read contacts", e)
+            error("Failed to read contacts: ${e.message ?: "Unknown error"}")
         }
     }
 
     private fun setAlarm(hour: Int, minute: Int, label: String): JSONObject {
         return try {
-            val intent = Intent(android.provider.AlarmClock.ACTION_SET_ALARM).apply {
-                putExtra(android.provider.AlarmClock.EXTRA_HOUR, hour)
-                putExtra(android.provider.AlarmClock.EXTRA_MINUTES, minute)
-                putExtra(android.provider.AlarmClock.EXTRA_MESSAGE, label)
-                putExtra(android.provider.AlarmClock.EXTRA_SKIP_UI, true)
+            val intent = Intent(AlarmClock.ACTION_SET_ALARM).apply {
+                putExtra(AlarmClock.EXTRA_HOUR, hour)
+                putExtra(AlarmClock.EXTRA_MINUTES, minute)
+                putExtra(AlarmClock.EXTRA_MESSAGE, label)
+                putExtra(AlarmClock.EXTRA_SKIP_UI, true)
                 flags = Intent.FLAG_ACTIVITY_NEW_TASK
             }
             context.startActivity(intent)
-            result("status", "ok", "message", "Alarm set for $hour:$minute")
+            result("status", "success", "message", "Alarm set for ${String.format("%02d:%02d", hour, minute)}${if (label.isNotBlank()) " ($label)" else ""}.")
         } catch (e: Exception) {
-            error("Failed to set alarm: ${e.message}")
+            AppLogger.e(TAG, "Failed to set alarm", e)
+            error("Failed to set alarm: ${e.message ?: "Unknown error"}")
         }
     }
 
     private fun setDoNotDisturb(on: Boolean): JSONObject {
         return try {
-            val notificationManager = context.getSystemService(Context.NOTIFICATION_SERVICE) as android.app.NotificationManager
+            val notificationManager = context.getSystemService(Context.NOTIFICATION_SERVICE) as? NotificationManager
+                ?: return error("Notification service is not available on this device.")
+
             if (notificationManager.isNotificationPolicyAccessGranted) {
                 if (on) {
-                    notificationManager.setInterruptionFilter(android.app.NotificationManager.INTERRUPTION_FILTER_NONE)
+                    notificationManager.setInterruptionFilter(NotificationManager.INTERRUPTION_FILTER_NONE)
                 } else {
-                    notificationManager.setInterruptionFilter(android.app.NotificationManager.INTERRUPTION_FILTER_ALL)
+                    notificationManager.setInterruptionFilter(NotificationManager.INTERRUPTION_FILTER_ALL)
                 }
-                result("status", "ok", "dnd", if (on) "on" else "off")
+                result("status", "success", "message", if (on) "Do Not Disturb turned on." else "Do Not Disturb turned off.", "dnd", if (on) "on" else "off")
             } else {
-                val intent = Intent(android.provider.Settings.ACTION_NOTIFICATION_POLICY_ACCESS_SETTINGS)
-                intent.flags = Intent.FLAG_ACTIVITY_NEW_TASK
+                val intent = Intent(Settings.ACTION_NOTIFICATION_POLICY_ACCESS_SETTINGS).apply {
+                    flags = Intent.FLAG_ACTIVITY_NEW_TASK
+                }
                 context.startActivity(intent)
-                result("status", "pending_user_action", "message", "Opened DND access settings")
+                result("status", "pending_user_action", "message", "Opened Do Not Disturb access settings for you to grant permission.")
             }
         } catch (e: Exception) {
-            error("Failed to set DND: ${e.message}")
+            AppLogger.e(TAG, "Failed to set DND", e)
+            error("Failed to set Do Not Disturb: ${e.message ?: "Unknown error"}")
         }
     }
 
     private fun openGoogleMaps(query: String): JSONObject {
         return try {
-            val gmmIntentUri = android.net.Uri.parse("geo:0,0?q=${android.net.Uri.encode(query)}")
-            val mapIntent = Intent(Intent.ACTION_VIEW, gmmIntentUri)
-            mapIntent.setPackage("com.google.android.apps.maps")
-            mapIntent.flags = Intent.FLAG_ACTIVITY_NEW_TASK
+            val gmmIntentUri = Uri.parse("geo:0,0?q=${Uri.encode(query)}")
+            val mapIntent = Intent(Intent.ACTION_VIEW, gmmIntentUri).apply {
+                setPackage("com.google.android.apps.maps")
+                flags = Intent.FLAG_ACTIVITY_NEW_TASK
+            }
             context.startActivity(mapIntent)
-            result("status", "ok")
+            result("status", "success", "message", "Opened Google Maps for '$query'.")
         } catch (e: Exception) {
-            error("Failed to open maps: ${e.message}")
+            AppLogger.e(TAG, "Failed to open maps", e)
+            error("Failed to open Google Maps: ${e.message ?: "Unknown error"}")
         }
     }
 
@@ -745,31 +1067,50 @@ class AgentToolExecutor(private val context: Context) {
     private fun accessibilityAction(action: (SoltiniAccessibilityService) -> Boolean): AccessibilityResult {
         val svc = SoltiniAccessibilityService.getInstance()
             ?: return AccessibilityResult.NoService
+        if (svc.isUserInteractingManually()) {
+            return AccessibilityResult.UserInteracting
+        }
         val ok = action(svc)
         return if (ok) AccessibilityResult.Success else AccessibilityResult.Failed
     }
 
     private sealed class AccessibilityResult {
         object NoService : AccessibilityResult()
+        object UserInteracting : AccessibilityResult()
         object Success : AccessibilityResult()
         object Failed : AccessibilityResult()
     }
 
     private infix fun AccessibilityResult.success(successMsg: String): JSONObject = when (this) {
-        is AccessibilityResult.NoService -> error("Accessibility Service not active. Enable it in Settings → Accessibility → Soltini")
-        is AccessibilityResult.Success   -> result("status", successMsg)
-        is AccessibilityResult.Failed    -> error("Action failed")
+        is AccessibilityResult.NoService -> error("LUCY Accessibility Service is disabled. Please enable LUCY in Settings > Accessibility to allow screen control.")
+        is AccessibilityResult.UserInteracting -> JSONObject().apply {
+            put("status", "user_active_backoff")
+            put("message", "User is currently touching the screen. Action paused to avoid conflict.")
+        }
+        is AccessibilityResult.Success   -> JSONObject().apply {
+            put("status", "success")
+            put("message", successMsg)
+        }
+        is AccessibilityResult.Failed    -> error("Accessibility action failed. Please make sure the device is active.")
     }
 
     private fun result(vararg pairs: Any): JSONObject = JSONObject().apply {
+        put("status", "success")
         var i = 0
         while (i < pairs.size - 1) {
             put(pairs[i].toString(), pairs[i + 1])
             i += 2
         }
+        if (!has("message") && has("status")) {
+            put("message", optString("status"))
+        }
     }
 
-    private fun error(msg: String): JSONObject = JSONObject().apply { put("error", msg) }
+    private fun error(msg: String): JSONObject = JSONObject().apply {
+        put("status", "error")
+        put("error", msg)
+        put("message", msg)
+    }
 }
 
 

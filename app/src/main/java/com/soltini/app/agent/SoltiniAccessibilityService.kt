@@ -13,6 +13,11 @@ import android.view.Display
 import android.view.accessibility.AccessibilityEvent
 import android.view.accessibility.AccessibilityNodeInfo
 import android.view.accessibility.AccessibilityWindowInfo
+import com.soltini.app.core.SoltiniDispatchers
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
+import kotlinx.coroutines.launch
 
 /**
  * SoltiniAccessibilityService
@@ -109,14 +114,78 @@ class SoltiniAccessibilityService : AccessibilityService() {
     // Last focused editable node — updated only when a tool call is active
     private var lastFocusedEditable: AccessibilityNodeInfo? = null
 
+    private val serviceScope = CoroutineScope(SoltiniDispatchers.AgentWorkerDispatcher + SupervisorJob())
+
+    private fun safeRecycle(node: AccessibilityNodeInfo?) {
+        if (node == null) return
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+            try {
+                node.recycle()
+            } catch (_: Throwable) {}
+        }
+    }
+
+    // ── Smart Manual Activity Detection ───────────────────────────────────────
+    @Volatile
+    private var lastUserManualInteractionTime: Long = 0L
+
+    fun isUserInteractingManually(): Boolean {
+        if (!appSettings.isSmartManualDetectionEnabled) return false
+        val elapsed = System.currentTimeMillis() - lastUserManualInteractionTime
+        val cooldownMs = appSettings.manualInteractionCooldownSeconds * 1000L
+        return elapsed < cooldownMs
+    }
+
+    fun notifyManualInteraction() {
+        lastUserManualInteractionTime = System.currentTimeMillis()
+    }
+
     override fun onServiceConnected() {
         super.onServiceConnected()
         instance = this
         isToolCallActive = false
         Log.i(TAG, "Accessibility Service connected — ready for tool calls")
-        // NOTE: We do NOT modify serviceInfo here. The static XML config is the
-        // single source of truth for event subscriptions. Touching serviceInfo
-        // at runtime was the root cause of the auto-disable bug.
+        ensureForegroundServicesRunning()
+    }
+
+    fun ensureForegroundServicesRunning() {
+        serviceScope.launch {
+            try {
+                if (appSettings.isAppPaused) {
+                    Log.d(TAG, "Watchdog: Soltini is Master PAUSED — skipping foreground services restart")
+                    return@launch
+                }
+                if (!appSettings.isAutoStartEnabled) return@launch
+
+                if (com.soltini.app.services.BackgroundVoiceService.getInstance() == null) {
+                    val voiceIntent = android.content.Intent(this@SoltiniAccessibilityService, com.soltini.app.services.BackgroundVoiceService::class.java).apply {
+                        putExtra(com.soltini.app.BootReceiver.EXTRA_FROM_BOOT_OR_RESURRECT, true)
+                    }
+                    try {
+                        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                            startForegroundService(voiceIntent)
+                        } else {
+                            startService(voiceIntent)
+                        }
+                        Log.d(TAG, "Watchdog: BackgroundVoiceService started safely off main thread")
+                    } catch (e: Exception) {
+                        Log.w(TAG, "Watchdog: Could not start BackgroundVoiceService: ${e.message}")
+                    }
+                }
+
+                if (android.provider.Settings.canDrawOverlays(this@SoltiniAccessibilityService) &&
+                    com.soltini.app.overlay.OverlayService.getInstance() == null) {
+                    try {
+                        com.soltini.app.overlay.OverlayService.start(this@SoltiniAccessibilityService)
+                        Log.d(TAG, "Watchdog: OverlayService started safely off main thread")
+                    } catch (e: Exception) {
+                        Log.w(TAG, "Watchdog: Could not start OverlayService: ${e.message}")
+                    }
+                }
+            } catch (t: Throwable) {
+                Log.w(TAG, "Watchdog error: ${t.message}")
+            }
+        }
     }
 
     @Volatile
@@ -125,50 +194,54 @@ class SoltiniAccessibilityService : AccessibilityService() {
     private val appSettings by lazy { com.soltini.app.settings.AppSettings(this) }
 
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {
-        // Lite Pause: service is alive but completely silent — return immediately
-        if (isPausedLite) return
+        // While app is paused: completely dormant with zero device relation,
+        // without disabling the service in Android OS (no re-grant needed in Settings)
+        if (appSettings.isAppPaused || isPausedLite) return
         try {
             event ?: return
             val eventType = event.eventType
 
-            if (isAutomatingForceStop) {
-                // We are looking for "Force stop" or "OK" buttons
-                val root = rootInActiveWindow
-                if (root != null) {
-                    // Look for "Force stop"
-                    var forceStopNode = findNodeByQuery(root, "force stop", requireClickable = true)
-                    // Some UIs use "Force closed" or just "Force"
-                    if (forceStopNode == null) forceStopNode = findNodeByQuery(root, "force", requireClickable = true)
-                    
-                    if (forceStopNode != null) {
-                        Log.i(TAG, "Found Force Stop button, clicking it!")
-                        forceStopNode.performAction(AccessibilityNodeInfo.ACTION_CLICK)
-                        forceStopNode.recycle()
-                        // Don't return yet, we might also see the OK button immediately on some UIs
-                    }
+            // ── Smart Manual Activity Detection ──────────────────────────────
+            // When user taps, scrolls, or types, detect immediately and return with ZERO delay
+            if (eventType == AccessibilityEvent.TYPE_VIEW_CLICKED ||
+                eventType == AccessibilityEvent.TYPE_VIEW_SCROLLED ||
+                eventType == AccessibilityEvent.TYPE_VIEW_TEXT_CHANGED
+            ) {
+                lastUserManualInteractionTime = System.currentTimeMillis()
+                if (isToolCallActive) {
+                    Log.i(TAG, "Manual user interaction detected (event=$eventType) — auto-yielding tool control to user")
+                    isToolCallActive = false
+                }
+                return // ZERO processing overhead — guarantee 0 touch lag for user
+            }
 
-                    // Look for confirmation button ("OK" or "Force stop" again)
-                    val okNode = findNodeByQuery(root, "ok", requireClickable = true)
-                    if (okNode != null) {
-                        Log.i(TAG, "Found OK confirmation, clicking it!")
-                        okNode.performAction(AccessibilityNodeInfo.ACTION_CLICK)
-                        okNode.recycle()
-                        isAutomatingForceStop = false // Automation complete
+            if (isAutomatingForceStop) {
+                serviceScope.launch {
+                    try {
+                        handleForceStopAutomation()
+                    } catch (t: Throwable) {
+                        Log.w(TAG, "handleForceStopAutomation caught error: ${t.message}")
                     }
-                    root.recycle()
                 }
             }
 
             if (eventType == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED) {
                 val packageName = event.packageName?.toString()
                 if (!packageName.isNullOrBlank()) {
-                    if (appSettings.isBankingProtectionEnabled && appSettings.isBankingApp(packageName)) {
-                        Log.i(TAG, "Banking app in foreground ($packageName) — hiding overlay & pausing A11y")
-                        isToolCallActive = false
-                        com.soltini.app.overlay.OverlayService.getInstance()?.setHiddenForBanking(true)
-                    } else if (appSettings.isBankingProtectionEnabled) {
-                        // Switched back to a normal app — restore overlay
-                        com.soltini.app.overlay.OverlayService.getInstance()?.setHiddenForBanking(false)
+                    serviceScope.launch {
+                        try {
+                            val overlay = com.soltini.app.overlay.OverlayService.getInstance()
+                            if (appSettings.isBankingProtectionEnabled && appSettings.isBankingApp(packageName)) {
+                                Log.i(TAG, "Banking app in foreground ($packageName) — hiding overlay & pausing A11y")
+                                isToolCallActive = false
+                                overlay?.setHiddenForBanking(true)
+                            } else if (appSettings.isBankingProtectionEnabled && overlay?.isHiddenForBanking() == true) {
+                                // Switched back to normal app — restore overlay ONLY if it was hidden for banking
+                                overlay.setHiddenForBanking(false)
+                            }
+                        } catch (t: Throwable) {
+                            Log.w(TAG, "Banking state transition caught error: ${t.message}")
+                        }
                     }
                 }
             }
@@ -179,12 +252,79 @@ class SoltiniAccessibilityService : AccessibilityService() {
             if (eventType == AccessibilityEvent.TYPE_VIEW_FOCUSED) {
                 val node = event.source
                 if (node != null && node.isEditable) {
-                    lastFocusedEditable?.recycle()
+                    safeRecycle(lastFocusedEditable)
                     lastFocusedEditable = AccessibilityNodeInfo.obtain(node)
+                    safeRecycle(node)
                 }
             }
         } catch (t: Throwable) {
             Log.e(TAG, "Suppressed crash in onAccessibilityEvent: ${t.message}")
+        }
+    }
+
+    private fun handleForceStopAutomation() {
+        val root = rootInActiveWindow ?: return
+        try {
+            // Try standard Android Settings view IDs first (language independent)
+            val forceStopViewIds = listOf(
+                "com.android.settings:id/button1_negative",
+                "com.android.settings:id/button1",
+                "com.android.settings:id/right_button",
+                "com.android.settings:id/force_stop_button"
+            )
+            var forceStopNode: AccessibilityNodeInfo? = null
+            for (id in forceStopViewIds) {
+                try {
+                    val matches = root.findAccessibilityNodeInfosByViewId(id)
+                    forceStopNode = matches?.firstOrNull { it.isEnabled && it.isClickable }
+                    if (forceStopNode != null) break
+                } catch (_: Exception) {}
+            }
+
+            // Fallback to multilingual text queries
+            if (forceStopNode == null) {
+                val queries = listOf("force stop", "force", "forcer l'arrêt", "forzar detención", "beenden erzwingen", "फ़ोर्स स्टॉप")
+                for (q in queries) {
+                    val candidate = findNodeByQuery(root, q, requireClickable = true)
+                    if (candidate != null && candidate.isEnabled) {
+                        forceStopNode = candidate
+                        break
+                    }
+                }
+            }
+
+            if (forceStopNode != null) {
+                Log.i(TAG, "Found Force Stop button, clicking it!")
+                forceStopNode.performAction(AccessibilityNodeInfo.ACTION_CLICK)
+                safeRecycle(forceStopNode)
+            }
+
+            // Look for confirmation dialog OK button (android:id/button1 is standard AlertDialog positive button)
+            var okNode: AccessibilityNodeInfo? = null
+            try {
+                val matches = root.findAccessibilityNodeInfosByViewId("android:id/button1")
+                okNode = matches?.firstOrNull { it.isEnabled && it.isClickable }
+            } catch (_: Exception) {}
+
+            if (okNode == null) {
+                val okQueries = listOf("ok", "force stop", "stop", "confirm", "d'accord", "aceptar", "bestätigen", "ठीक")
+                for (q in okQueries) {
+                    val candidate = findNodeByQuery(root, q, requireClickable = true)
+                    if (candidate != null && candidate.isEnabled) {
+                        okNode = candidate
+                        break
+                    }
+                }
+            }
+
+            if (okNode != null) {
+                Log.i(TAG, "Found OK confirmation, clicking it!")
+                okNode.performAction(AccessibilityNodeInfo.ACTION_CLICK)
+                safeRecycle(okNode)
+                isAutomatingForceStop = false // Automation complete
+            }
+        } finally {
+            safeRecycle(root)
         }
     }
 
@@ -193,6 +333,8 @@ class SoltiniAccessibilityService : AccessibilityService() {
         // the service as crashed and may auto-disable the permission.
         try {
             Log.w(TAG, "Accessibility Service interrupted")
+            isToolCallActive = false
+            isAutomatingForceStop = false
         } catch (_: Throwable) {}
     }
 
@@ -202,11 +344,26 @@ class SoltiniAccessibilityService : AccessibilityService() {
             // a destroyed service context.
             instance = null
             isToolCallActive = false
-            lastFocusedEditable?.recycle()
+            isAutomatingForceStop = false
+            safeRecycle(lastFocusedEditable)
             lastFocusedEditable = null
+            serviceScope.cancel()
         } catch (_: Throwable) {}
         super.onDestroy()
         Log.i(TAG, "Accessibility Service destroyed")
+    }
+
+    override fun onTaskRemoved(rootIntent: android.content.Intent?) {
+        super.onTaskRemoved(rootIntent)
+        Log.i(TAG, "onTaskRemoved: SoltiniAccessibilityService thread-safe state cleanup on task removal")
+        try {
+            isToolCallActive = false
+            isAutomatingForceStop = false
+            safeRecycle(lastFocusedEditable)
+            lastFocusedEditable = null
+        } catch (t: Throwable) {
+            Log.w(TAG, "Error in onTaskRemoved cleanup: ${t.message}")
+        }
     }
 
     // ─── Global Actions ───────────────────────────────────────────────────────
@@ -257,8 +414,14 @@ class SoltiniAccessibilityService : AccessibilityService() {
                                 val hardwareBuffer = screenshot.hardwareBuffer
                                 val colorSpace = screenshot.colorSpace
                                 val bitmap = Bitmap.wrapHardwareBuffer(hardwareBuffer, colorSpace)
-                                hardwareBuffer.close()
-                                val softwareBitmap = bitmap?.copy(Bitmap.Config.ARGB_8888, false)
+                                val softwareBitmap = try {
+                                    bitmap?.copy(Bitmap.Config.ARGB_8888, false)
+                                } finally {
+                                    try { hardwareBuffer.close() } catch (_: Exception) {}
+                                }
+                                if (bitmap != null && softwareBitmap != null && softwareBitmap != bitmap) {
+                                    try { bitmap.recycle() } catch (_: Exception) {}
+                                }
                                 callback(softwareBitmap ?: bitmap)
                             } catch (e: Exception) {
                                 Log.e(TAG, "Failed to decode hardware screenshot: ${e.message}")
@@ -301,7 +464,7 @@ class SoltiniAccessibilityService : AccessibilityService() {
                 for (window in windowList) {
                     val root = window.root ?: continue
                     collectNodeText(root, sb, depth = 0)
-                    root.recycle()
+                    safeRecycle(root)
                 }
             }
 
@@ -310,7 +473,7 @@ class SoltiniAccessibilityService : AccessibilityService() {
                 val activeRoot = rootInActiveWindow
                 if (activeRoot != null) {
                     collectNodeText(activeRoot, sb, depth = 0)
-                    activeRoot.recycle()
+                    safeRecycle(activeRoot)
                 }
             }
         } catch (e: Exception) {
@@ -334,7 +497,7 @@ class SoltiniAccessibilityService : AccessibilityService() {
                 for (window in windowList) {
                     val root = window.root ?: continue
                     nodeCount = collectCompactNodeText(root, sb, nodeCount, maxNodes)
-                    root.recycle()
+                    safeRecycle(root)
                     if (nodeCount >= maxNodes) break
                 }
             }
@@ -343,7 +506,7 @@ class SoltiniAccessibilityService : AccessibilityService() {
                 val activeRoot = rootInActiveWindow
                 if (activeRoot != null) {
                     collectCompactNodeText(activeRoot, sb, 0, maxNodes)
-                    activeRoot.recycle()
+                    safeRecycle(activeRoot)
                 }
             }
         } catch (e: Exception) {
@@ -383,7 +546,7 @@ class SoltiniAccessibilityService : AccessibilityService() {
             if (count >= maxNodes) break
             val child = node.getChild(i) ?: continue
             count = collectCompactNodeText(child, sb, count, maxNodes)
-            child.recycle()
+            safeRecycle(child)
         }
         return count
     }
@@ -439,7 +602,7 @@ class SoltiniAccessibilityService : AccessibilityService() {
         for (i in 0 until node.childCount) {
             val child = node.getChild(i) ?: continue
             collectNodeText(child, sb, depth + 1)
-            child.recycle()
+            safeRecycle(child)
         }
     }
 
@@ -454,10 +617,10 @@ class SoltiniAccessibilityService : AccessibilityService() {
         for (window in windowList) {
             val root = window.root ?: continue
             val match = findNodeByQuery(root, q, requireClickable = false)
-            root.recycle()
+            safeRecycle(root)
             if (match != null) {
                 val clicked = performClickOrTap(match)
-                match.recycle()
+                safeRecycle(match)
                 if (clicked) {
                     Log.i(TAG, "clickByText('$query') -> succeeded in window")
                     return true
@@ -469,10 +632,10 @@ class SoltiniAccessibilityService : AccessibilityService() {
         val activeRoot = rootInActiveWindow
         if (activeRoot != null) {
             val match = findNodeByQuery(activeRoot, q, requireClickable = false)
-            activeRoot.recycle()
+            safeRecycle(activeRoot)
             if (match != null) {
                 val clicked = performClickOrTap(match)
-                match.recycle()
+                safeRecycle(match)
                 if (clicked) {
                     Log.i(TAG, "clickByText('$query') -> succeeded in rootInActiveWindow")
                     return true
@@ -485,6 +648,10 @@ class SoltiniAccessibilityService : AccessibilityService() {
     }
 
     private fun performClickOrTap(node: AccessibilityNodeInfo): Boolean {
+        if (isUserInteractingManually()) {
+            Log.w(TAG, "performClickOrTap suppressed: User is actively interacting manually with device")
+            return false
+        }
         // A. Direct accessibility click on node
         if (node.isClickable && node.performAction(AccessibilityNodeInfo.ACTION_CLICK)) {
             return true
@@ -494,11 +661,11 @@ class SoltiniAccessibilityService : AccessibilityService() {
         var parent = node.parent
         while (parent != null) {
             if (parent.isClickable && parent.performAction(AccessibilityNodeInfo.ACTION_CLICK)) {
-                parent.recycle()
+                safeRecycle(parent)
                 return true
             }
             val nextParent = parent.parent
-            parent.recycle()
+            safeRecycle(parent)
             parent = nextParent
         }
 
@@ -515,6 +682,10 @@ class SoltiniAccessibilityService : AccessibilityService() {
     }
 
     fun tapAt(x: Float, y: Float): Boolean {
+        if (isUserInteractingManually()) {
+            Log.w(TAG, "tapAt($x, $y) suppressed: User is actively interacting manually with device")
+            return false
+        }
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.N) {
             Log.w(TAG, "tapAt requires Android 7+")
             return false
@@ -536,6 +707,10 @@ class SoltiniAccessibilityService : AccessibilityService() {
     }
 
     fun swipe(x1: Float, y1: Float, x2: Float, y2: Float, durationMs: Long = 300): Boolean {
+        if (isUserInteractingManually()) {
+            Log.w(TAG, "swipe suppressed: User is actively interacting manually with device")
+            return false
+        }
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.N) return false
         return try {
             val path = Path().apply {
@@ -555,6 +730,10 @@ class SoltiniAccessibilityService : AccessibilityService() {
     // ─── Typing ───────────────────────────────────────────────────────────────
 
     fun typeText(text: String): Boolean {
+        if (isUserInteractingManually()) {
+            Log.w(TAG, "typeText suppressed: User is actively interacting manually with device")
+            return false
+        }
         try {
             val cached = lastFocusedEditable
             if (cached != null) {
@@ -573,11 +752,11 @@ class SoltiniAccessibilityService : AccessibilityService() {
             for (window in windows) {
                 val root = window.root ?: continue
                 val editable = findFirstEditable(root)
-                root.recycle()
+                safeRecycle(root)
                 if (editable != null) {
                     editable.performAction(AccessibilityNodeInfo.ACTION_ACCESSIBILITY_FOCUS)
                     val success = setTextOnNode(editable, text)
-                    editable.recycle()
+                    safeRecycle(editable)
                     if (success) return true
                 }
             }
@@ -612,6 +791,10 @@ class SoltiniAccessibilityService : AccessibilityService() {
     fun scrollUp(): Boolean = scroll(forward = false)
 
     private fun scroll(forward: Boolean): Boolean {
+        if (isUserInteractingManually()) {
+            Log.w(TAG, "scroll suppressed: User is actively interacting manually with device")
+            return false
+        }
         val action = if (forward)
             AccessibilityNodeInfo.ACTION_SCROLL_FORWARD
         else
@@ -621,10 +804,10 @@ class SoltiniAccessibilityService : AccessibilityService() {
         for (window in windows) {
             val root = window.root ?: continue
             val scrollable = findFirstScrollable(root)
-            root.recycle()
+            safeRecycle(root)
             if (scrollable != null) {
                 val success = scrollable.performAction(action)
-                scrollable.recycle()
+                safeRecycle(scrollable)
                 Log.i(TAG, "scroll(forward=$forward) -> $success")
                 return success
             }
@@ -680,7 +863,7 @@ class SoltiniAccessibilityService : AccessibilityService() {
         for (i in 0 until node.childCount) {
             val child = node.getChild(i) ?: continue
             val found = findNodeByQuery(child, query, requireClickable)
-            child.recycle()
+            safeRecycle(child)
             if (found != null) return found
         }
         return null
@@ -691,7 +874,7 @@ class SoltiniAccessibilityService : AccessibilityService() {
         for (i in 0 until node.childCount) {
             val child = node.getChild(i) ?: continue
             val found = findFirstEditable(child)
-            child.recycle()
+            safeRecycle(child)
             if (found != null) return found
         }
         return null
@@ -702,7 +885,7 @@ class SoltiniAccessibilityService : AccessibilityService() {
         for (i in 0 until node.childCount) {
             val child = node.getChild(i) ?: continue
             val found = findFirstScrollable(child)
-            child.recycle()
+            safeRecycle(child)
             if (found != null) return found
         }
         return null

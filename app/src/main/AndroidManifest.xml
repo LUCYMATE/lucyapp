@@ -12,7 +12,6 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MICROPHONE" />
-    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PROJECTION" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_CAMERA" />
     <uses-permission android:name="android.permission.WAKE_LOCK" />
     <uses-permission android:name="android.permission.DISABLE_KEYGUARD" />
@@ -95,6 +94,13 @@
                 <category android:name="android.intent.category.DEFAULT" />
                 <data android:mimeType="audio/*" />
             </intent-filter>
+            <!-- Intent filter for Soltini Auth deep links (OAuth callback) -->
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
+                <data android:scheme="soltini" />
+            </intent-filter>
         </activity>
 
 
@@ -109,13 +115,6 @@
             android:taskAffinity=""
             android:theme="@android:style/Theme.Translucent.NoTitleBar"
             android:turnScreenOn="true" />
-
-        <!-- ── Screen Capture Permission Activity ───────────────────────── -->
-        <activity
-            android:name=".ui.ScreenCapturePermissionActivity"
-            android:excludeFromRecents="true"
-            android:exported="false"
-            android:theme="@android:style/Theme.Translucent.NoTitleBar" />
 
         <!-- ── AssistLaunchActivity ─────────────────────────────────────── -->
         <activity
@@ -147,6 +146,7 @@
         <service
             android:name=".agent.SoltiniAccessibilityService"
             android:permission="android.permission.BIND_ACCESSIBILITY_SERVICE"
+            android:stopWithTask="false"
             android:exported="true">
             <intent-filter>
                 <action android:name="android.accessibilityservice.AccessibilityService" />
@@ -182,7 +182,7 @@
             android:name=".services.BackgroundVoiceService"
             android:exported="false"
             android:stopWithTask="false"
-            android:foregroundServiceType="microphone|mediaProjection|specialUse">
+            android:foregroundServiceType="microphone|specialUse">
             <property android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
                       android:value="ai_voice_assistant_background"/>
         </service>
@@ -202,12 +202,18 @@
         <!-- ── Receivers ────────────────────────────────────────────────── -->
         <receiver
             android:name=".BootReceiver"
-            android:exported="true">
-            <intent-filter>
+            android:enabled="true"
+            android:exported="true"
+            android:directBootAware="true">
+            <intent-filter android:priority="1000">
                 <action android:name="android.intent.action.BOOT_COMPLETED" />
+                <action android:name="android.intent.action.LOCKED_BOOT_COMPLETED" />
+                <action android:name="android.intent.action.USER_PRESENT" />
                 <action android:name="android.intent.action.QUICKBOOT_POWERON" />
                 <action android:name="com.htc.intent.action.QUICKBOOT_POWERON" />
                 <action android:name="android.intent.action.MY_PACKAGE_REPLACED" />
+                <action android:name="android.intent.action.REBOOT" />
+                <action android:name="com.soltini.app.RESTART_SERVICE" />
                 <category android:name="android.intent.category.DEFAULT" />
             </intent-filter>
         </receiver>

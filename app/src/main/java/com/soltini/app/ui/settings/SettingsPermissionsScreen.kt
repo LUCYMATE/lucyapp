@@ -108,6 +108,7 @@ fun SettingsPermissionsScreen() {
     var autoStartRequested by remember {
         mutableStateOf(context.getSharedPreferences("app_prefs", Context.MODE_PRIVATE).getBoolean("autostart_requested", false))
     }
+    var showAccessibilityDisclosure by remember { mutableStateOf(false) }
 
     val micLauncher = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { granted -> hasMic = granted }
     val multiPermLauncher = rememberLauncherForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) { permissions ->
@@ -178,7 +179,51 @@ fun SettingsPermissionsScreen() {
             }
         }
         PermissionCard(Icons.Default.Accessibility, "Accessibility Service", "Enables screen control and automation gestures.", hasAccessibility, PermTier.AGENT) {
-            context.startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+            if (hasAccessibility) {
+                context.startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+            } else {
+                showAccessibilityDisclosure = true
+            }
+        }
+
+        if (showAccessibilityDisclosure) {
+            androidx.compose.material3.AlertDialog(
+                onDismissRequest = { showAccessibilityDisclosure = false },
+                title = {
+                    Text(
+                        text = "Accessibility Service Disclosure",
+                        fontWeight = FontWeight.Bold,
+                        fontSize = 18.sp
+                    )
+                },
+                text = {
+                    Text(
+                        text = "LUCY uses the Android Accessibility API exclusively to perform user-requested actions by voice, such as opening applications and navigating screens on your command.\n\n" +
+                                "• LUCY does NOT collect, store, or transmit your personal data, credentials, or keystrokes.\n" +
+                                "• LUCY does NOT observe or interact with banking, payment, or financial applications.\n" +
+                                "• You can turn off this permission at any time in system settings.",
+                        fontSize = 13.5.sp,
+                        lineHeight = 19.sp
+                    )
+                },
+                confirmButton = {
+                    androidx.compose.material3.TextButton(
+                        onClick = {
+                            showAccessibilityDisclosure = false
+                            context.startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+                        }
+                    ) {
+                        Text("Agree & Continue", fontWeight = FontWeight.Bold)
+                    }
+                },
+                dismissButton = {
+                    androidx.compose.material3.TextButton(
+                        onClick = { showAccessibilityDisclosure = false }
+                    ) {
+                        Text("Cancel")
+                    }
+                }
+            )
         }
         
         if (!hasRestrictedSettings && !hasAccessibility) {

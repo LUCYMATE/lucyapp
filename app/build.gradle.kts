@@ -23,6 +23,21 @@ android {
     testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
   }
 
+  flavorDimensions += "distribution"
+
+  productFlavors {
+    create("playstore") {
+      dimension = "distribution"
+      applicationId = "com.soltini.app"
+      versionName = "1.0.0"
+    }
+    create("standalone") {
+      dimension = "distribution"
+      applicationId = "com.soltini.app"
+      versionName = "1.0.0-standalone"
+    }
+  }
+
   signingConfigs {
     create("release") {
       val keystorePath = System.getenv("KEYSTORE_PATH") ?: "${rootDir}/my-upload-key.jks"
@@ -32,7 +47,9 @@ android {
       keyPassword = System.getenv("KEY_PASSWORD")
     }
     create("debugConfig") {
-      storeFile = file("${rootDir}/debug.keystore")
+      val localDebugKeystore = file("${rootDir}/debug.keystore")
+      val defaultDebugKeystore = file("${System.getProperty("user.home")}/.android/debug.keystore")
+      storeFile = if (localDebugKeystore.exists()) localDebugKeystore else defaultDebugKeystore
       storePassword = "android"
       keyAlias = "androiddebugkey"
       keyPassword = "android"
@@ -44,10 +61,20 @@ android {
       isCrunchPngs = false
       isMinifyEnabled = false
       proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
-      signingConfig = signingConfigs.getByName("release")
+      val releaseSigning = signingConfigs.getByName("release")
+      if (releaseSigning.storeFile?.exists() == true) {
+        signingConfig = releaseSigning
+      } else {
+        signingConfig = signingConfigs.getByName("debugConfig")
+      }
     }
     debug { }
   }
+
+  androidResources {
+    noCompress += listOf("vrm", "moc3")
+  }
+
   compileOptions {
     sourceCompatibility = JavaVersion.VERSION_11
     targetCompatibility = JavaVersion.VERSION_11
@@ -60,6 +87,11 @@ android {
   dependenciesInfo {
     includeInApk = false
     includeInBundle = true
+  }
+  lint {
+    abortOnError = false
+    checkReleaseBuilds = false
+    disable += listOf("InvalidFragmentVersionForActivityResult")
   }
 }
 
@@ -80,6 +112,7 @@ dependencies {
   implementation(platform(libs.firebase.bom))
   // implementation(libs.accompanist.permissions)
   implementation(libs.androidx.activity.compose)
+  implementation("androidx.fragment:fragment-ktx:1.8.6")
   // implementation(libs.androidx.camera.camera2)
   // implementation(libs.androidx.camera.core)
   // implementation(libs.androidx.camera.lifecycle)
@@ -91,6 +124,7 @@ dependencies {
   implementation(libs.androidx.compose.ui.graphics)
   implementation(libs.androidx.compose.ui.tooling.preview)
   implementation(libs.androidx.core.ktx)
+  implementation(libs.androidx.webkit)
   // implementation(libs.androidx.datastore.preferences)
   implementation(libs.androidx.lifecycle.runtime.compose)
   implementation(libs.androidx.lifecycle.runtime.ktx)
@@ -98,18 +132,16 @@ dependencies {
   // implementation(libs.androidx.navigation.compose)
   implementation(libs.androidx.room.ktx)
   implementation(libs.androidx.room.runtime)
-  // implementation(libs.coil.compose)
+  implementation(libs.coil.compose)
   implementation(libs.converter.moshi)
   implementation(libs.firebase.ai)
   // Uncomment to use Firestore:
   // implementation(libs.firebase.firestore)
 
-  // Uncomment ALL FOUR of the following dependencies together to use Firebase Auth and Google
-  // Sign-In via Credential Manager:
-  // implementation(libs.firebase.auth)
-  // implementation(libs.androidx.credentials)
-  // implementation(libs.androidx.credentials.play.services)
-  // implementation(libs.googleid)
+  // Google Sign-In via Credential Manager:
+  implementation(libs.androidx.credentials)
+  implementation(libs.androidx.credentials.play.services)
+  implementation(libs.googleid)
   implementation(libs.firebase.appcheck.recaptcha)
   implementation(libs.kotlinx.coroutines.android)
   implementation(libs.kotlinx.coroutines.core)

@@ -3,19 +3,26 @@ package com.soltini.app.audio
 import android.content.Context
 import android.media.AudioAttributes
 import android.media.AudioDeviceInfo
+import android.media.AudioFocusRequest
 import android.media.AudioFormat
 import android.media.AudioManager
 import android.media.AudioTrack
 import android.os.Build
+import com.soltini.app.core.SoltiniDispatchers
 import com.soltini.app.util.AppLogger
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancelChildren
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
-import java.util.concurrent.ConcurrentLinkedQueue
+import kotlinx.coroutines.yield
+import java.util.concurrent.LinkedBlockingQueue
+import java.util.concurrent.TimeUnit
 import kotlin.math.abs
 
 /**
@@ -23,15 +30,65 @@ import kotlin.math.abs
  */
 class AudioPlayer(private val context: Context? = null) {
 
+    private val playerScope = CoroutineScope(Dispatchers.Default + SupervisorJob())
+    private var audioFocusRequest: AudioFocusRequest? = null
+
+    private fun requestFocus() {
+        if (context == null) return
+        val am = context.getSystemService(Context.AUDIO_SERVICE) as? AudioManager ?: return
+        try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                if (audioFocusRequest == null) {
+                    val playbackAttributes = AudioAttributes.Builder()
+                        .setUsage(AudioAttributes.USAGE_MEDIA)
+                        .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
+                        .build()
+                    audioFocusRequest = AudioFocusRequest.Builder(AudioManager.AUDIOFOCUS_GAIN_TRANSIENT_MAY_DUCK)
+                        .setAudioAttributes(playbackAttributes)
+                        .setAcceptsDelayedFocusGain(false)
+                        .setOnAudioFocusChangeListener { /* no-op */ }
+                        .build()
+                }
+                am.requestAudioFocus(audioFocusRequest!!)
+            } else {
+                @Suppress("DEPRECATION")
+                am.requestAudioFocus(
+                    null,
+                    AudioManager.STREAM_MUSIC,
+                    AudioManager.AUDIOFOCUS_GAIN_TRANSIENT_MAY_DUCK
+                )
+            }
+        } catch (e: Exception) {
+            AppLogger.w(TAG, "Audio focus request failed: ${e.message}")
+        }
+    }
+
+    private fun abandonFocus() {
+        if (context == null) return
+        val am = context.getSystemService(Context.AUDIO_SERVICE) as? AudioManager ?: return
+        try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                audioFocusRequest?.let { am.abandonAudioFocusRequest(it) }
+            } else {
+                @Suppress("DEPRECATION")
+                am.abandonAudioFocus(null)
+            }
+        } catch (e: Exception) {
+            AppLogger.w(TAG, "Audio focus abandon failed: ${e.message}")
+        }
+    }
+
     companion object {
         private const val TAG = "AudioPlayer"
         private const val SAMPLE_RATE = 24000
     }
 
     private var audioTrack: AudioTrack? = null
-    private val audioQueue = ConcurrentLinkedQueue<ByteArray>()
+    private val audioQueue = LinkedBlockingQueue<ByteArray>()
     private var playbackJob: Job? = null
     private var isPlaying = false
+    @Volatile private var totalFramesWritten = 0L
+    @Volatile private var queueEmptySince = 0L
 
     private val _speakerAmplitude = MutableStateFlow(0f)
     val speakerAmplitude: StateFlow<Float> = _speakerAmplitude.asStateFlow()
@@ -49,7 +106,7 @@ class AudioPlayer(private val context: Context? = null) {
                 AudioFormat.ENCODING_PCM_16BIT
             )
 
-            val bufferSize = maxOf(minBufferSize, SAMPLE_RATE * 2) // 1 sec buffer
+            val bufferSize = maxOf(minBufferSize * 2, SAMPLE_RATE / 4) // ~250ms low-latency buffer
 
             audioTrack = AudioTrack.Builder()
                 .setAudioAttributes(
@@ -95,15 +152,22 @@ class AudioPlayer(private val context: Context? = null) {
     }
 
     private fun startPlaybackLoop() {
-        playbackJob = CoroutineScope(Dispatchers.IO).launch {
+        playbackJob = CoroutineScope(SupervisorJob() + SoltiniDispatchers.AudioPlaybackDispatcher).launch {
             var playChunkCount = 0
-            var totalFramesWritten = 0L
-            var queueEmptySince = 0L
+            totalFramesWritten = 0L
+            queueEmptySince = 0L
 
             while (isPlaying) {
-                val chunk = audioQueue.poll()
+                // Poll with minimal timeout: wakes up immediately when a new audio chunk is offered
+                val chunk = audioQueue.poll(if (_isSpeaking.value) 5 else 15, TimeUnit.MILLISECONDS)
                 if (chunk != null && chunk.isNotEmpty()) {
-                    _isSpeaking.value = true
+                    if (!_isSpeaking.value) {
+                        _isSpeaking.value = true
+                        // Request audio focus asynchronously on playerScope so it never blocks writing the first chunk
+                        playerScope.launch {
+                            requestFocus()
+                        }
+                    }
                     queueEmptySince = 0L
                     calculateAmplitude(chunk)
 
@@ -118,6 +182,7 @@ class AudioPlayer(private val context: Context? = null) {
                             AppLogger.d(TAG, "Writing bytes to AudioTrack: chunk #$playChunkCount (${chunk.size} bytes)")
                         }
                     }
+                    yield()
                 } else {
                     // Queue is empty — but audio may still be playing in hardware buffer.
                     // Calculate how many frames the hardware has actually played using playbackHeadPosition.
@@ -134,15 +199,20 @@ class AudioPlayer(private val context: Context? = null) {
                         } else {
                             true
                         }
-                        if (hardwareDone) {
+                        val timeEmpty = System.currentTimeMillis() - queueEmptySince
+                        // Either hardware DAC completed the playback (80ms debounce) OR
+                        // safety timeout (350ms) elapsed so mic is never blocked by stalled HAL positions
+                        if ((hardwareDone && timeEmpty >= 80) || timeEmpty >= 350) {
                             // Audio has fully drained from the hardware DAC
                             _isSpeaking.value = false
                             _speakerAmplitude.value = 0f
+                            abandonFocus()
                             totalFramesWritten = 0L
-                            AppLogger.d(TAG, "AudioTrack hardware drain complete — mic unmuting")
+                            queueEmptySince = 0L
+                            AppLogger.d(TAG, "AudioTrack hardware drain complete — mic unmuting (timeEmpty=${timeEmpty}ms)")
                         }
                     }
-                    Thread.sleep(10)
+                    delay(5)
                 }
             }
         }
@@ -151,6 +221,15 @@ class AudioPlayer(private val context: Context? = null) {
     fun playChunk(chunk: ByteArray) {
         if (!isPlaying) start()
         audioQueue.add(chunk)
+    }
+
+    /**
+     * Called when Gemini signals turnComplete so playback can drain swiftly.
+     */
+    fun markTurnComplete() {
+        if (audioQueue.isEmpty() && queueEmptySince == 0L) {
+            queueEmptySince = System.currentTimeMillis()
+        }
     }
 
     /**
@@ -171,6 +250,9 @@ class AudioPlayer(private val context: Context? = null) {
         }
         _isSpeaking.value = false
         _speakerAmplitude.value = 0f
+        totalFramesWritten = 0L
+        queueEmptySince = 0L
+        abandonFocus()
     }
 
     private fun calculateAmplitude(pcmData: ByteArray) {
@@ -193,6 +275,7 @@ class AudioPlayer(private val context: Context? = null) {
         isPlaying = false
         playbackJob?.cancel()
         playbackJob = null
+        playerScope.coroutineContext.cancelChildren()
         audioQueue.clear()
         try {
             audioTrack?.stop()
@@ -203,6 +286,7 @@ class AudioPlayer(private val context: Context? = null) {
         audioTrack = null
         _isSpeaking.value = false
         _speakerAmplitude.value = 0f
+        abandonFocus()
         AppLogger.i(TAG, "AudioTrack stopped")
     }
 }

@@ -44,6 +44,7 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -84,28 +85,32 @@ fun MemoryVaultScreen(
     val scope = rememberCoroutineScope()
     val memoryManager = remember { viewModel.getMemoryManager() }
 
-    var memories by remember { mutableStateOf<List<MemoryDatabase.Memory>>(emptyList()) }
+    val liveMemories: List<MemoryDatabase.Memory> by (
+        memoryManager?.memoriesFlow?.collectAsState(initial = emptyList())
+            ?: remember { mutableStateOf(emptyList<MemoryDatabase.Memory>()) }
+    )
     var searchQuery by remember { mutableStateOf("") }
+    var selectedCategory by remember { mutableStateOf("ALL") }
     var showAddDialog by remember { mutableStateOf(false) }
     var newFactText by remember { mutableStateOf("") }
     var isLoading by remember { mutableStateOf(false) }
 
-    fun refreshMemories() {
-        scope.launch(Dispatchers.IO) {
-            val list = memoryManager?.getAllMemories() ?: emptyList()
-            withContext(Dispatchers.Main) {
-                memories = list
-            }
-        }
-    }
-
     LaunchedEffect(Unit) {
-        refreshMemories()
+        memoryManager?.refreshMemories()
     }
 
-    val filteredMemories = remember(memories, searchQuery) {
-        if (searchQuery.isBlank()) memories
-        else memories.filter { it.content.contains(searchQuery, ignoreCase = true) }
+    val filteredMemories = remember(liveMemories, searchQuery, selectedCategory) {
+        liveMemories.filter { mem ->
+            val matchesQuery = if (searchQuery.isBlank()) true else mem.content.contains(searchQuery, ignoreCase = true)
+            val matchesCategory = when (selectedCategory) {
+                "AI_AUTO" -> mem.importance >= 0.72f
+                "IDENTITY" -> mem.content.contains(Regex("name|called|born|age|birthday|i am|myself", RegexOption.IGNORE_CASE))
+                "PREFERENCES" -> mem.content.contains(Regex("like|love|prefer|favorite|hobby|enjoy|fan", RegexOption.IGNORE_CASE))
+                "PLACES" -> mem.content.contains(Regex("live|from|city|work|home|office|country|location", RegexOption.IGNORE_CASE))
+                else -> true
+            }
+            matchesQuery && matchesCategory
+        }
     }
 
     Surface(
@@ -125,7 +130,7 @@ fun MemoryVaultScreen(
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.SpaceBetween
             ) {
-                Column {
+                Column(modifier = Modifier.weight(1f)) {
                     Text(
                         text = "Memory Vault",
                         color = TextPrimary,
@@ -133,11 +138,13 @@ fun MemoryVaultScreen(
                         fontWeight = FontWeight.Black
                     )
                     Text(
-                        text = "${memories.size} facts injected into Gemini context",
+                        text = "${liveMemories.size} facts remembered & auto-injected into Gemini",
                         color = TextSecondary,
                         fontSize = 12.sp
                     )
                 }
+
+                Spacer(Modifier.width(10.dp))
 
                 Button(
                     onClick = { showAddDialog = true },
@@ -146,18 +153,18 @@ fun MemoryVaultScreen(
                 ) {
                     Icon(Icons.Default.Add, null, tint = Color.White, modifier = Modifier.size(16.dp))
                     Spacer(Modifier.width(4.dp))
-                    Text("Add Fact", color = Color.White, fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                    Text("Add Fact", color = Color.White, fontSize = 12.sp, fontWeight = FontWeight.Bold, maxLines = 1, softWrap = false)
                 }
             }
 
-            Spacer(Modifier.height(16.dp))
+            Spacer(Modifier.height(14.dp))
 
             // Search Box
             OutlinedTextField(
                 value = searchQuery,
                 onValueChange = { searchQuery = it },
                 modifier = Modifier.fillMaxWidth(),
-                placeholder = { Text("Search remembered facts...", color = TextSecondary, fontSize = 13.sp) },
+                placeholder = { Text("Search remembered facts, likes, names...", color = TextSecondary, fontSize = 13.sp) },
                 leadingIcon = { Icon(Icons.Default.Search, null, tint = RosePink) },
                 singleLine = true,
                 shape = RoundedCornerShape(16.dp),
@@ -170,7 +177,45 @@ fun MemoryVaultScreen(
                 )
             )
 
-            Spacer(Modifier.height(16.dp))
+            Spacer(Modifier.height(10.dp))
+
+            // Category Filter Chips
+            val categories = listOf(
+                "ALL" to "All (${liveMemories.size})",
+                "AI_AUTO" to "🤖 AI Auto-Saved",
+                "IDENTITY" to "👤 Identity",
+                "PREFERENCES" to "❤️ Likes & Favs",
+                "PLACES" to "📍 Places"
+            )
+            androidx.compose.foundation.lazy.LazyRow(
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                items(categories) { (key, label) ->
+                    val isSelected = selectedCategory == key
+                    val bg = if (isSelected) RosePink else PearlWhiteSurface
+                    val textCol = if (isSelected) Color.White else TextPrimary
+                    val borderCol = if (isSelected) RosePink else PinkyBorder
+
+                    Box(
+                        modifier = Modifier
+                            .clip(RoundedCornerShape(14.dp))
+                            .background(bg)
+                            .border(1.dp, borderCol, RoundedCornerShape(14.dp))
+                            .clickable { selectedCategory = key }
+                            .padding(horizontal = 12.dp, vertical = 6.dp)
+                    ) {
+                        Text(
+                            text = label,
+                            color = textCol,
+                            fontSize = 11.sp,
+                            fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Medium
+                        )
+                    }
+                }
+            }
+
+            Spacer(Modifier.height(14.dp))
 
             // Memory List
             if (filteredMemories.isEmpty()) {
@@ -192,8 +237,8 @@ fun MemoryVaultScreen(
                         }
                         Spacer(Modifier.height(12.dp))
                         Text(
-                            if (searchQuery.isBlank()) "No memories stored yet.\nTalk to Soltini or tap '+ Add Fact' above!"
-                            else "No memories match \"$searchQuery\"",
+                            if (searchQuery.isBlank() && selectedCategory == "ALL") "No memories stored yet.\nTalk to Soltini (say your name, likes, habits) or tap '+ Add Fact' above!"
+                            else "No memories match current filter",
                             color = TextSecondary,
                             fontSize = 13.sp,
                             textAlign = androidx.compose.ui.text.style.TextAlign.Center,
@@ -214,7 +259,6 @@ fun MemoryVaultScreen(
                             onDelete = {
                                 scope.launch(Dispatchers.IO) {
                                     memoryManager?.deleteMemory(memory.id)
-                                    refreshMemories()
                                 }
                                 Toast.makeText(context, "Memory deleted", Toast.LENGTH_SHORT).show()
                             }
@@ -268,7 +312,6 @@ fun MemoryVaultScreen(
                                     newFactText = ""
                                     showAddDialog = false
                                     isLoading = false
-                                    refreshMemories()
                                     Toast.makeText(context, "Memory saved!", Toast.LENGTH_SHORT).show()
                                 }
                             }
@@ -300,6 +343,8 @@ private fun MemoryItemCard(
         sdf.format(Date(memory.createdAt))
     }
 
+    val isAutoSaved = memory.importance >= 0.72f
+
     Card(
         modifier = Modifier.fillMaxWidth(),
         colors = CardDefaults.cardColors(containerColor = PearlWhiteSurface),
@@ -321,12 +366,12 @@ private fun MemoryItemCard(
                     Box(
                         modifier = Modifier
                             .clip(RoundedCornerShape(6.dp))
-                            .background(RosePink.copy(alpha = 0.12f))
+                            .background(if (isAutoSaved) SoftViolet.copy(alpha = 0.15f) else RosePink.copy(alpha = 0.12f))
                             .padding(horizontal = 6.dp, vertical = 2.dp)
                     ) {
                         Text(
-                            text = if (memory.importance >= 0.7f) "HIGH" else "SAVED",
-                            color = RosePink,
+                            text = if (isAutoSaved) "🤖 AUTO-SAVED" else "SAVED NOTE",
+                            color = if (isAutoSaved) SoftViolet else RosePink,
                             fontSize = 9.sp,
                             fontWeight = FontWeight.Bold
                         )

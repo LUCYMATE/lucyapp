@@ -26,50 +26,72 @@ class BootReceiver : BroadcastReceiver() {
 
     companion object {
         private const val TAG = "SoltiniBootReceiver"
+        const val EXTRA_FROM_BOOT_OR_RESURRECT = "from_boot_or_resurrect"
     }
 
     override fun onReceive(context: Context, intent: Intent) {
         val action = intent.action ?: return
 
-        // Accept standard boot + OEM quick-boot variants
+        // Accept standard boot, direct boot, screen unlock + OEM quick-boot variants
         val isBootAction = action == Intent.ACTION_BOOT_COMPLETED ||
+                action == Intent.ACTION_LOCKED_BOOT_COMPLETED ||
+                action == Intent.ACTION_USER_PRESENT ||
                 action == "android.intent.action.QUICKBOOT_POWERON" ||          // HTC
                 action == "com.htc.intent.action.QUICKBOOT_POWERON" ||          // HTC (legacy)
                 action == "android.intent.action.MY_PACKAGE_REPLACED" ||        // APK update restart
+                action == "android.intent.action.REBOOT" ||
                 action == "com.soltini.app.RESTART_SERVICE"                     // Custom task removed restart
 
         if (!isBootAction) return
 
-        Log.i(TAG, "Boot/update event received (action=$action) — starting Soltini services")
+        val appSettings = com.soltini.app.settings.AppSettings(context)
+        if (appSettings.isAppPaused) {
+            Log.i(TAG, "Event ($action) received but Soltini is completely PAUSED by user. Skipping all background starts.")
+            return
+        }
+        if (!appSettings.isAutoStartEnabled) {
+            Log.i(TAG, "Event ($action) received but Background Auto-Start is disabled by user in settings. Skipping.")
+            return
+        }
+
+        Log.i(TAG, "Boot/update/resurrection event received (action=$action) — starting Soltini services")
 
         // ── Start BackgroundVoiceService ─────────────────────────────────────
         try {
-            val voiceIntent = Intent(context, BackgroundVoiceService::class.java)
+            val voiceIntent = Intent(context, BackgroundVoiceService::class.java).apply {
+                this.action = action
+                putExtra(EXTRA_FROM_BOOT_OR_RESURRECT, true)
+            }
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
                 context.startForegroundService(voiceIntent)
             } else {
                 context.startService(voiceIntent)
             }
-            Log.i(TAG, "BackgroundVoiceService started after boot")
+            Log.i(TAG, "BackgroundVoiceService start triggered after $action")
         } catch (e: Exception) {
-            Log.e(TAG, "Failed to start BackgroundVoiceService: ${e.message}", e)
+            Log.e(TAG, "Failed to start BackgroundVoiceService on $action: ${e.message}", e)
+            com.soltini.app.agent.SoltiniAccessibilityService.getInstance()?.ensureForegroundServicesRunning()
         }
 
         // ── Start OverlayService (only if overlay permission is still granted) ─
         try {
             if (Settings.canDrawOverlays(context)) {
-                val overlayIntent = Intent(context, OverlayService::class.java)
+                val overlayIntent = Intent(context, OverlayService::class.java).apply {
+                    this.action = action
+                    putExtra(EXTRA_FROM_BOOT_OR_RESURRECT, true)
+                }
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
                     context.startForegroundService(overlayIntent)
                 } else {
                     context.startService(overlayIntent)
                 }
-                Log.i(TAG, "OverlayService started after boot")
+                Log.i(TAG, "OverlayService start triggered after $action")
             } else {
-                Log.w(TAG, "Overlay permission not granted — OverlayService skipped at boot")
+                Log.w(TAG, "Overlay permission not granted — OverlayService skipped at $action")
             }
         } catch (e: Exception) {
-            Log.e(TAG, "Failed to start OverlayService: ${e.message}", e)
+            Log.e(TAG, "Failed to start OverlayService on $action: ${e.message}", e)
+            com.soltini.app.agent.SoltiniAccessibilityService.getInstance()?.ensureForegroundServicesRunning()
         }
     }
 }

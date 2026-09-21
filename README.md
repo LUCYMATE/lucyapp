@@ -38,7 +38,7 @@ Unlike traditional turn-based assistants, Soltini provides **true full-duplex co
 - **WhatsApp & Social Automator**: Automated message sending, voice calling, and continuous Instagram Reels scrolling.
 
 ### 🎭 3D VRM Avatar & Floating System Overlay
-- **Live 3D Avatar**: Real-time 3D avatar rendering using WebGL/Three.js inside an optimized native WebView bridge (`soltini.vrm`).
+- **Live 3D Avatar**: Real-time 3D avatar rendering using WebGL/Three.js inside an optimized native WebView bridge (`lucy.vrm`).
 - **Real-Time Lip Sync**: Dynamic viseme morphing synchronized with incoming audio streams.
 - **Draggable Floating Overlay**: Minimalist floating pill/orb with dynamic glow rings that remain accessible across all apps.
 
@@ -131,7 +131,7 @@ soltiniapp/
 │   └── src/main/
 │       ├── AndroidManifest.xml    # Permissions, Services, Receivers & Assistant hooks
 │       ├── assets/
-│       │   ├── avatar/            # 3D VRM WebGL engine & soltini.vrm model
+│       │   ├── avatar/            # 3D VRM WebGL engine & lucy.vrm model
 │       │   └── web/               # Web assets, audio-worklet & bundle
 │       ├── java/com/soltini/app/
 │       │   ├── MainActivity.kt    # Navigation & Compose root

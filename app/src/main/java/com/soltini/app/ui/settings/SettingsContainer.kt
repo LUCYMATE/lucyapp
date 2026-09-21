@@ -1,4 +1,4 @@
-﻿package com.soltini.app.ui.settings
+package com.soltini.app.ui.settings
 
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.clickable
@@ -35,11 +35,12 @@ import com.soltini.app.ui.theme.PinkyWhiteBackground
 import com.soltini.app.ui.theme.RosePink
 import com.soltini.app.ui.theme.TextPrimary
 
-enum class SettingsRoute { MAIN, PERMISSIONS, API, MEMORY, AUDIO, CALLS, ABOUT, CONNECTORS, SHIELD, LOGS }
+enum class SettingsRoute { MAIN, PERMISSIONS, API, MEMORY, AUDIO, CALLS, ABOUT, CONNECTORS, SHIELD, LOGS, OVERLAY, PROFILE }
 
 @Composable
 fun SettingsContainer(
     onBack: () -> Unit,
+    onSignOut: () -> Unit = {},
     viewModel: MainViewModel? = null,
     modifier: Modifier = Modifier
 ) {
@@ -88,7 +89,10 @@ fun SettingsContainer(
             // Sub-Settings Route Dispatcher
             Box(modifier = Modifier.fillMaxSize()) {
                 when (currentRoute) {
-                    SettingsRoute.MAIN -> SettingsMainScreen(onNavigate = { currentRoute = it })
+                    SettingsRoute.MAIN -> SettingsMainScreen(
+                        onNavigate = { currentRoute = it },
+                        onSignOut = onSignOut
+                    )
                     SettingsRoute.API -> SettingsAiConfigScreen(
                         appSettings = viewModel?.appSettings,
                         onSaveAndReconnect = { viewModel?.reconnect() }
@@ -101,6 +105,11 @@ fun SettingsContainer(
                     SettingsRoute.ABOUT -> SettingsAboutScreen()
                     SettingsRoute.MEMORY -> SettingsMemoryScreen(memoryManager = viewModel?.getMemoryManager())
                     SettingsRoute.CONNECTORS -> SettingsConnectorsScreen(viewModel = viewModel)
+                    SettingsRoute.OVERLAY -> SettingsFloatingOverlayScreen(appSettings = viewModel?.appSettings)
+                    SettingsRoute.PROFILE -> com.soltini.app.ui.auth.ProfileScreen(
+                        onBack = { currentRoute = SettingsRoute.MAIN },
+                        onSignOut = onSignOut
+                    )
                 }
             }
         }

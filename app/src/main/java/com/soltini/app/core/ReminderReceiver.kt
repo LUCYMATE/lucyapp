@@ -22,7 +22,7 @@ class ReminderReceiver : BroadcastReceiver() {
     companion object {
         private const val TAG = "ReminderReceiver"
         private const val CHANNEL_ID = "soltini_reminders"
-        private const val CHANNEL_NAME = "Soltini Reminders"
+        private const val CHANNEL_NAME = "LUCY Reminders"
 
         fun scheduleReminder(
             context: Context,
@@ -111,7 +111,7 @@ class ReminderReceiver : BroadcastReceiver() {
 
         val notification = NotificationCompat.Builder(context, CHANNEL_ID)
             .setSmallIcon(android.R.drawable.ic_dialog_info)
-            .setContentTitle("Soltini Reminder")
+            .setContentTitle("LUCY Reminder")
             .setContentText(message)
             .setStyle(NotificationCompat.BigTextStyle().bigText(message))
             .setPriority(NotificationCompat.PRIORITY_HIGH)

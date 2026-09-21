@@ -22,8 +22,12 @@ import androidx.compose.animation.slideInHorizontally
 import androidx.compose.animation.slideOutHorizontally
 import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
+import androidx.compose.ui.res.painterResource
+import com.soltini.app.R
+
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -101,6 +105,7 @@ fun UnifiedOnboardingScreen(
 ) {
     val context = LocalContext.current
     var currentStep by remember { mutableIntStateOf(0) }
+    var showAccessibilityDisclosure by remember { mutableStateOf(false) }
     
     val manufacturer = Build.MANUFACTURER.lowercase()
     val isMiui = manufacturer == "xiaomi" || manufacturer == "poco" || manufacturer == "redmi"
@@ -179,10 +184,7 @@ fun UnifiedOnboardingScreen(
             actionLabel = "Open Accessibility Settings",
             hasAction = true,
             onAction = {
-                context.startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS).apply {
-                    flags = Intent.FLAG_ACTIVITY_NEW_TASK
-                })
-                currentStep++
+                showAccessibilityDisclosure = true
             }
         ),
         OnboardingStep(
@@ -285,6 +287,49 @@ fun UnifiedOnboardingScreen(
                     )
                 )
         ) {
+            if (showAccessibilityDisclosure) {
+                androidx.compose.material3.AlertDialog(
+                    onDismissRequest = { showAccessibilityDisclosure = false },
+                    title = {
+                        Text(
+                            text = "Accessibility Service Disclosure",
+                            fontWeight = FontWeight.Bold,
+                            fontSize = 18.sp
+                        )
+                    },
+                    text = {
+                        Text(
+                            text = "LUCY uses Android's Accessibility API exclusively to carry out tasks requested by you via voice commands (such as opening apps, clicking buttons, and scrolling).\n\n" +
+                                    "• LUCY does NOT collect, store, or transmit your keystrokes, personal messages, or credentials.\n" +
+                                    "• LUCY automatically pauses and never interacts with banking, payment, or financial applications.\n" +
+                                    "• You can turn off this permission at any time in system settings.",
+                            fontSize = 13.5.sp,
+                            lineHeight = 19.sp
+                        )
+                    },
+                    confirmButton = {
+                        androidx.compose.material3.TextButton(
+                            onClick = {
+                                showAccessibilityDisclosure = false
+                                context.startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS).apply {
+                                    flags = Intent.FLAG_ACTIVITY_NEW_TASK
+                                })
+                                currentStep++
+                            }
+                        ) {
+                            Text("Agree & Continue", fontWeight = FontWeight.Bold)
+                        }
+                    },
+                    dismissButton = {
+                        androidx.compose.material3.TextButton(
+                            onClick = { showAccessibilityDisclosure = false }
+                        ) {
+                            Text("Cancel")
+                        }
+                    }
+                )
+            }
+
             Column(
                 modifier = Modifier
                     .fillMaxSize()
@@ -297,6 +342,18 @@ fun UnifiedOnboardingScreen(
                     modifier = Modifier.fillMaxWidth(),
                     horizontalAlignment = Alignment.CenterHorizontally
                 ) {
+                    // Official Soltini Brand Logo
+                    Image(
+                        painter = painterResource(id = R.drawable.ic_soltini_logo),
+                        contentDescription = "LUCY Brand Logo",
+                        modifier = Modifier
+                            .size(72.dp)
+                            .clip(RoundedCornerShape(20.dp))
+                            .border(1.5.dp, PinkyBorder, RoundedCornerShape(20.dp))
+                    )
+
+                    Spacer(modifier = Modifier.height(14.dp))
+
                     // Small Luxury Brand Badge
                     Box(
                         modifier = Modifier
@@ -314,7 +371,7 @@ fun UnifiedOnboardingScreen(
                             )
                             Spacer(Modifier.width(6.dp))
                             Text(
-                                text = "SOLTINI LUXURY AI",
+                                text = "LUCY LUXURY AI",
                                 color = RosePink,
                                 fontSize = 11.sp,
                                 fontWeight = FontWeight.Bold,
@@ -659,19 +716,7 @@ private data class OnboardingStep(
 )
 
 private fun launchAutoStartSettings(context: Context) {
-    val intents = listOf(
-        Intent().apply {
-            component = ComponentName("com.miui.securitycenter", "com.miui.permcenter.autostart.AutoStartManagementActivity")
-        },
-        Intent().apply {
-            component = ComponentName("com.miui.securitycenter", "com.miui.securitycenter.MainActivity")
-        },
-        Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS).apply {
-            data = Uri.parse("package:${context.packageName}")
-            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-        }
-    )
-    tryStartActivities(context, intents)
+    com.soltini.app.ui.settings.SettingsPermChecks.launchAutoStart(context)
 }
 
 private fun launchBatterySettings(context: Context) {

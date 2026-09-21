@@ -6,10 +6,12 @@ import android.content.pm.PackageManager
 import android.util.Log
 import org.json.JSONObject
 
+import kotlinx.coroutines.delay
+
 /**
  * WhatsAppAutomator
  *
- * Automates WhatsApp using AccessibilityService UI automation.
+ * Automates WhatsApp using AccessibilityService UI automation with non-blocking coroutines.
  *
  * Tools:
  *  - whatsapp_send_message
@@ -26,7 +28,7 @@ class WhatsAppAutomator(private val context: Context) {
     /**
      * Sends a message to a contact by automating the UI.
      */
-    fun sendMessage(contactName: String, message: String): JSONObject {
+    suspend fun sendMessage(contactName: String, message: String): JSONObject {
         if (contactName.isBlank() || message.isBlank()) {
             return error("contact_name and message are required")
         }
@@ -35,36 +37,40 @@ class WhatsAppAutomator(private val context: Context) {
             ?: return error("Accessibility Service not active")
 
         if (!launchWhatsApp()) return error("WhatsApp not installed")
-        Thread.sleep(1500) // Wait for app to open
+        
+        // Wait up to 2 seconds for WhatsApp to load
+        var ready = svc.waitForScreenText("Search", timeoutSeconds = 2)
+        if (!ready) delay(600)
 
         // 1. Click Search icon
         if (!svc.clickByText("Search")) {
             return error("Could not find WhatsApp search button")
         }
-        Thread.sleep(500)
+        delay(300)
 
         // 2. Type contact name
         if (!svc.typeText(contactName)) {
             return error("Could not type in search field")
         }
-        Thread.sleep(1500) // Wait for search results
+        
+        // Wait for search results
+        ready = svc.waitForScreenText(contactName, timeoutSeconds = 2)
+        if (!ready) delay(800)
 
         // 3. Click contact (we try to click the exact name, or something close)
         if (!svc.clickByText(contactName)) {
             return error("Contact '$contactName' not found in search results")
         }
-        Thread.sleep(1000) // Wait for chat to open
+        delay(600) // Wait for chat to open
 
         // 4. Type message
         if (!svc.typeText(message)) {
             return error("Could not type message in chat")
         }
-        Thread.sleep(500)
+        delay(300)
 
         // 5. Click Send
         if (!svc.clickByText("Send")) {
-            // Sometimes it's just an icon without text, we might need a coordinate fallback,
-            // but "Send" usually works as content description on the button.
             return error("Could not find Send button")
         }
 
@@ -74,23 +80,26 @@ class WhatsAppAutomator(private val context: Context) {
     /**
      * Starts a voice or video call.
      */
-    fun makeCall(contactName: String, isVideo: Boolean): JSONObject {
+    suspend fun makeCall(contactName: String, isVideo: Boolean): JSONObject {
         if (contactName.isBlank()) return error("contact_name is required")
 
         val svc = SoltiniAccessibilityService.getInstance()
             ?: return error("Accessibility Service not active")
 
         if (!launchWhatsApp()) return error("WhatsApp not installed")
-        Thread.sleep(1500)
+        
+        var ready = svc.waitForScreenText("Search", timeoutSeconds = 2)
+        if (!ready) delay(600)
 
         if (!svc.clickByText("Search")) return error("Could not find WhatsApp search button")
-        Thread.sleep(500)
+        delay(300)
 
         if (!svc.typeText(contactName)) return error("Could not type in search field")
-        Thread.sleep(1500)
+        ready = svc.waitForScreenText(contactName, timeoutSeconds = 2)
+        if (!ready) delay(800)
 
         if (!svc.clickByText(contactName)) return error("Contact '$contactName' not found")
-        Thread.sleep(1000)
+        delay(600)
 
         val callButton = if (isVideo) "Video call" else "Voice call"
         if (!svc.clickByText(callButton)) {

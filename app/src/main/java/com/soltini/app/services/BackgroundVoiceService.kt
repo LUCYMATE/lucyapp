@@ -7,6 +7,7 @@ import android.app.PendingIntent
 import android.app.Service
 import android.content.Context
 import android.content.Intent
+import android.media.AudioAttributes
 import android.media.AudioDeviceInfo
 import android.media.AudioFormat
 import android.media.AudioManager
@@ -23,6 +24,7 @@ import com.soltini.app.BootReceiver
 import com.soltini.app.agent.AgentToolExecutor
 import com.soltini.app.audio.AudioPlayer
 import com.soltini.app.audio.AudioRecorder
+import com.soltini.app.core.SoltiniDispatchers
 import com.soltini.app.memory.MemoryDatabase
 import com.soltini.app.memory.MemoryManager
 import com.soltini.app.network.ConnectionState
@@ -41,6 +43,7 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withTimeoutOrNull
 import org.json.JSONObject
 import java.util.concurrent.atomic.AtomicInteger
 import java.io.File
@@ -64,6 +67,15 @@ class BackgroundVoiceService : Service(), GeminiLiveListener, ToolCallListener {
         private const val TAG = "BackgroundVoiceService"
         private const val CHANNEL_ID = "VoiceSessionChannel"
         private const val NOTIFICATION_ID = 2
+
+        const val ACTION_PAUSE_APP = "com.soltini.app.ACTION_PAUSE_APP"
+        const val ACTION_RESUME_APP = "com.soltini.app.ACTION_RESUME_APP"
+
+        @Volatile
+        private var instance: BackgroundVoiceService? = null
+
+        fun getInstance(): BackgroundVoiceService? = instance
+        fun isActive(): Boolean = instance != null
     }
 
     private val binder = LocalBinder()
@@ -74,6 +86,14 @@ class BackgroundVoiceService : Service(), GeminiLiveListener, ToolCallListener {
     // ── User-configurable AI settings ────────────────────────────────────────
     lateinit var appSettings: AppSettings
         private set
+
+    // ── Master App Pause ─────────────────────────────────────────────────────
+    /**
+     * App Master Pause — user explicitly paused the entire app.
+     * When true: zero background mic, zero WebSocket, no floating overlay, no auto-resurrection.
+     */
+    private val _isAppPaused = MutableStateFlow(false)
+    val isAppPaused: StateFlow<Boolean> = _isAppPaused.asStateFlow()
 
     // ── Persistent vector memory ─────────────────────────────────────────────
     lateinit var memoryManager: MemoryManager
@@ -134,21 +154,73 @@ class BackgroundVoiceService : Service(), GeminiLiveListener, ToolCallListener {
     // Zero-battery MIUI bypass
     private var silentMediaPlayer: MediaPlayer? = null
 
+    @Volatile
+    private var isAppInForeground = false
+
+    fun setAppInForeground(inForeground: Boolean) {
+        isAppInForeground = inForeground
+        if (inForeground) {
+            val hasMic = androidx.core.content.ContextCompat.checkSelfPermission(
+                this,
+                android.Manifest.permission.RECORD_AUDIO
+            ) == android.content.pm.PackageManager.PERMISSION_GRANTED
+            _hasMicPermission.value = hasMic
+            if (hasMic) {
+                promoteToMicrophoneFgs()
+                if (::audioRecorder.isInitialized && connectionState.value == ConnectionState.Live && !audioRecorder.isRecordingActive) {
+                    audioRecorder.startRecording()
+                }
+            }
+            if (!appSettings.isAppPaused && !_isLitePaused.value && !_isHardPaused.value) {
+                if (connectionState.value == ConnectionState.Disconnected || connectionState.value == ConnectionState.Error) {
+                    connect()
+                }
+            }
+        }
+    }
+
+    fun promoteToMicrophoneFgs() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            try {
+                val hasMicPermission = androidx.core.content.ContextCompat.checkSelfPermission(
+                    this,
+                    android.Manifest.permission.RECORD_AUDIO
+                ) == android.content.pm.PackageManager.PERMISSION_GRANTED
+                if (hasMicPermission) {
+                    val notification = buildNotification("Your AI Assistant is active")
+                    startForeground(NOTIFICATION_ID, notification, android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE)
+                    Log.d(TAG, "Promoted FGS to MICROPHONE type")
+                }
+            } catch (e: Exception) {
+                Log.w(TAG, "Failed to promote FGS to MICROPHONE type: ${e.message}")
+            }
+        }
+    }
+
     inner class LocalBinder : Binder() {
         fun getService(): BackgroundVoiceService = this@BackgroundVoiceService
     }
 
     override fun onCreate() {
         super.onCreate()
+        instance = this
         Log.i(TAG, "BackgroundVoiceService created")
+
+        // ── User-configurable settings + memory FIRST ───────────────────────────
+        appSettings = AppSettings(this)
+        _isAppPaused.value = appSettings.isAppPaused
+        val initialMic = androidx.core.content.ContextCompat.checkSelfPermission(
+            this,
+            android.Manifest.permission.RECORD_AUDIO
+        ) == android.content.pm.PackageManager.PERMISSION_GRANTED
+        _hasMicPermission.value = initialMic
+        Log.i(TAG, "Initial microphone permission granted=$initialMic, isAppPaused=${appSettings.isAppPaused}")
+        memoryManager = MemoryManager(MemoryDatabase(this), appSettings)
 
         // Start hardware-offloaded silent audio to bypass MIUI's "Clear All" with 0% battery drain
         startZeroBatterySilentAudioTrick()
 
-        // ── FIRST: Call startForeground immediately ─────────────────────────────
-        // Android 8+ will kill any service that does not call startForeground within
-        // 5 seconds of creation. We do this BEFORE any other work so we never hit
-        // that window even if GeminiLiveManager or AudioRecorder take time to init.
+        // ── Call startForeground immediately ─────────────────────────────────────
         createNotificationChannel()
         startForegroundService()
 
@@ -178,23 +250,21 @@ class BackgroundVoiceService : Service(), GeminiLiveListener, ToolCallListener {
             }
         }
 
-        // ── User-configurable settings + memory ──────────────────────────────
-        appSettings = AppSettings(this)
-        memoryManager = MemoryManager(MemoryDatabase(this), appSettings)
-
         wakeWordEngine = com.soltini.app.audio.WakeWordEngine(this).apply {
             initialize()
             onWakeWordDetected = { word ->
-                Log.i(TAG, "Wake word detected: $word — activating assistant")
-                if (_isSleeping.value) {
-                    wakeUp()
+                if (!appSettings.isAppPaused) {
+                    Log.i(TAG, "Wake word detected: $word — activating assistant")
+                    if (_isSleeping.value) {
+                        wakeUp()
+                    }
+                    if (connectionState.value == ConnectionState.Disconnected) {
+                        connect()
+                    }
+                    OverlayService.getInstance()?.setRingState(com.soltini.app.overlay.RingState.LISTENING)
                 }
-                if (connectionState.value == ConnectionState.Disconnected) {
-                    connect()
-                }
-                OverlayService.getInstance()?.setRingState(com.soltini.app.overlay.RingState.LISTENING)
             }
-            if (appSettings.isWakeWordEnabled) {
+            if (appSettings.isWakeWordEnabled && !appSettings.isAppPaused) {
                 start()
             }
         }
@@ -219,15 +289,17 @@ class BackgroundVoiceService : Service(), GeminiLiveListener, ToolCallListener {
 
         audioRecorder = AudioRecorder(
             onAudioChunkCaptured = { pcmChunk ->
-                if (appSettings.isWakeWordEnabled) {
+                if (appSettings.isWakeWordEnabled && _isSleeping.value) {
                     wakeWordEngine.processAudioFrame(pcmChunk, pcmChunk.size)
                 }
                 if (!_isSleeping.value && !_isMuted.value) {
                     geminiLiveManager.sendAudioChunk(pcmChunk)
                 }
             },
-            onSpeechStateChanged = {
-                lastSpeechTimestamp = System.currentTimeMillis()
+            onSpeechStateChanged = { isSpeech ->
+                if (isSpeech) {
+                    lastSpeechTimestamp = System.currentTimeMillis()
+                }
             }
         ).apply {
             isDataSaverEnabled = appSettings.isDataSaverEnabled
@@ -261,7 +333,9 @@ class BackgroundVoiceService : Service(), GeminiLiveListener, ToolCallListener {
                     ConnectionState.Live -> {
                         try {
                             val am = getSystemService(Context.AUDIO_SERVICE) as AudioManager
-                            // Force sound output to the loud bottom media speaker, NOT the phone call earpiece
+                            // Switch to MODE_IN_COMMUNICATION with speakerphone enabled so Android
+                            // hardware AEC (Acoustic Echo Cancellation) & NS (Noise Suppression) are active
+                            am.mode = AudioManager.MODE_IN_COMMUNICATION
                             am.isSpeakerphoneOn = true
                             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
                                 val speakerDevice = am.availableCommunicationDevices.firstOrNull {
@@ -269,16 +343,10 @@ class BackgroundVoiceService : Service(), GeminiLiveListener, ToolCallListener {
                                 }
                                 if (speakerDevice != null) {
                                     am.setCommunicationDevice(speakerDevice)
-                                    Log.i(TAG, "Enforced communication device to TYPE_BUILTIN_SPEAKER")
                                 }
                             }
-                            if (appSettings.isScreenRecordingModeEnabled) {
-                                am.mode = AudioManager.MODE_IN_COMMUNICATION
-                            } else {
-                                am.mode = AudioManager.MODE_NORMAL
-                            }
                         } catch (e: Exception) {
-                            Log.w(TAG, "Failed to configure speaker routing: ${e.message}")
+                            Log.w(TAG, "Failed to configure audio mode: ${e.message}")
                         }
 
                         lastSpeechTimestamp = System.currentTimeMillis()
@@ -300,7 +368,11 @@ class BackgroundVoiceService : Service(), GeminiLiveListener, ToolCallListener {
                             Log.w(TAG, "Failed to restore audio routing: ${e.message}")
                         }
 
-                        audioRecorder.stopRecording()
+                        // Keep mic alive if we're sleeping with wake word enabled —
+                        // stopRecording() here would kill the wake-word listener.
+                        if (!(_isSleeping.value && appSettings.isWakeWordEnabled)) {
+                            audioRecorder.stopRecording()
+                        }
                         val ringState = if (_isSleeping.value) com.soltini.app.overlay.RingState.SLEEPING else com.soltini.app.overlay.RingState.IDLE
                         OverlayService.getInstance()?.setRingState(ringState)
                     }
@@ -333,7 +405,7 @@ class BackgroundVoiceService : Service(), GeminiLiveListener, ToolCallListener {
         }
 
         // Auto-connect if restarted by system (e.g. after swipe from recents)
-        if (androidx.core.content.ContextCompat.checkSelfPermission(
+        if (!appSettings.isAppPaused && androidx.core.content.ContextCompat.checkSelfPermission(
                 this,
                 android.Manifest.permission.RECORD_AUDIO
             ) == android.content.pm.PackageManager.PERMISSION_GRANTED) {
@@ -345,6 +417,24 @@ class BackgroundVoiceService : Service(), GeminiLiveListener, ToolCallListener {
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        when (intent?.action) {
+            ACTION_PAUSE_APP -> {
+                pauseApp()
+                return START_NOT_STICKY
+            }
+            ACTION_RESUME_APP -> {
+                resumeApp()
+                return START_STICKY
+            }
+        }
+
+        val isPaused = if (::appSettings.isInitialized) appSettings.isAppPaused else false
+        if (isPaused) {
+            Log.i(TAG, "onStartCommand: Soltini is Master PAUSED — ensuring pause state and standing down")
+            pauseApp()
+            return START_NOT_STICKY
+        }
+
         if (intent?.action == "com.soltini.app.ACTION_SPEAK_REMINDER") {
             val msg = intent.getStringExtra("message") ?: ""
             if (msg.isNotEmpty()) {
@@ -369,51 +459,120 @@ class BackgroundVoiceService : Service(), GeminiLiveListener, ToolCallListener {
                     }
                 }
             }
-        } else if (_isSleeping.value) {
-            wakeUp()
+        } else {
+            val isStickyRestart = intent == null
+            val isBootOrResurrect = isStickyRestart ||
+                    intent?.getBooleanExtra(BootReceiver.EXTRA_FROM_BOOT_OR_RESURRECT, false) == true ||
+                    intent?.action == Intent.ACTION_BOOT_COMPLETED ||
+                    intent?.action == Intent.ACTION_LOCKED_BOOT_COMPLETED ||
+                    intent?.action == "com.soltini.app.RESTART_SERVICE"
+
+            if (isBootOrResurrect) {
+                Log.i(TAG, "Service started in background standby via boot/resurrection/sticky (isSticky=$isStickyRestart)")
+                // Go to sleep mode, but sleep() will preserve the mic if wake word is enabled
+                if (!_isSleeping.value) {
+                    sleep()
+                } else if (appSettings.isWakeWordEnabled && !audioRecorder.isRecordingActive && _hasMicPermission.value) {
+                    // Already sleeping but mic was somehow stopped — restart it for wake word detection
+                    audioRecorder.startRecording()
+                }
+
+                // Ensure overlay is also up if allowed and not already running
+                if (android.provider.Settings.canDrawOverlays(this) &&
+                    OverlayService.getInstance() == null &&
+                    appSettings.isAutoStartEnabled) {
+                    try {
+                        OverlayService.start(this)
+                        Log.i(TAG, "OverlayService started from BackgroundVoiceService resurrection")
+                    } catch (e: Exception) {
+                        Log.w(TAG, "Could not start OverlayService on resurrect: ${e.message}")
+                    }
+                }
+            } else if (_isSleeping.value) {
+                wakeUp()
+            }
         }
         
-        // START_NOT_STICKY: We explicitly do NOT want the OS to natively resurrect this service.
-        // Instead, we manually handle the "continuous agent" resurrection via AlarmManager in
-        // onTaskRemoved, which allows us to respect Pause Mode (i.e. we don't schedule the alarm
-        // if the user paused the agent before swiping it away).
-        return START_NOT_STICKY
+        return START_STICKY
     }
 
     override fun onTaskRemoved(rootIntent: Intent?) {
-        if (_isLitePaused.value || _isHardPaused.value) {
-            Log.i(TAG, "Task removed while PAUSED — shutting down completely and not auto-restarting")
-            
-            // Fully shut down everything since the user swiped away while paused
-            audioRecorder.stopRecording()
-            audioPlayer.stop()
-            geminiLiveManager.disconnect()
-            wakeLock?.let { if (it.isHeld) it.release() }
-            
-            com.soltini.app.agent.SoltiniAccessibilityService.getInstance()?.isToolCallActive = false
-            OverlayService.stop(this)
-            stopSelf()
-        } else {
-            Log.i(TAG, "Task removed (swiped from recents) — scheduling AlarmManager to restart service")
-            val restartIntent = Intent(applicationContext, com.soltini.app.BootReceiver::class.java).apply {
+        super.onTaskRemoved(rootIntent)
+        val isPaused = if (::appSettings.isInitialized) appSettings.isAppPaused else false
+        if (isPaused) {
+            Log.i(TAG, "onTaskRemoved: App is Master PAUSED — skipping background resurrection")
+            return
+        }
+        Log.i(TAG, "onTaskRemoved: Swiped from recents — scheduling background resurrection")
+        scheduleServiceResurrection()
+    }
+
+    private fun scheduleServiceResurrection() {
+        val isPaused = if (::appSettings.isInitialized) appSettings.isAppPaused else false
+        if (isPaused) {
+            Log.d(TAG, "Service resurrection skipped because Master Pause is active")
+            return
+        }
+        if (_isHardPaused.value) {
+            Log.d(TAG, "Service resurrection skipped because hard pause is active")
+            return
+        }
+        val isAutoStart = if (::appSettings.isInitialized) appSettings.isAutoStartEnabled else true
+        if (!isAutoStart) {
+            Log.d(TAG, "Service resurrection skipped because AutoStart is disabled in settings")
+            return
+        }
+        try {
+            val restartIntent = Intent(applicationContext, BootReceiver::class.java).apply {
                 action = "com.soltini.app.RESTART_SERVICE"
+                setPackage(packageName)
             }
             val pendingIntent = PendingIntent.getBroadcast(
                 applicationContext,
-                1,
+                1002,
                 restartIntent,
-                PendingIntent.FLAG_ONE_SHOT or PendingIntent.FLAG_IMMUTABLE
+                PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
             )
-            val alarmManager = getSystemService(Context.ALARM_SERVICE) as android.app.AlarmManager
-            // Fire 1 second from now to allow the OS to finish killing the process first
-            alarmManager.set(
-                android.app.AlarmManager.ELAPSED_REALTIME_WAKEUP,
-                android.os.SystemClock.elapsedRealtime() + 1000,
-                pendingIntent
-            )
+            val alarmManager = getSystemService(Context.ALARM_SERVICE) as? AlarmManager
+            val triggerAt = System.currentTimeMillis() + 1000L
+
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
+                try {
+                    val showIntent = PendingIntent.getActivity(
+                        applicationContext,
+                        0,
+                        Intent(applicationContext, MainActivity::class.java).apply {
+                            flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP
+                        },
+                        PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+                    )
+                    // setAlarmClock grants Android 12+ (API 31+) background foreground service start exemption
+                    val alarmClockInfo = AlarmManager.AlarmClockInfo(triggerAt, showIntent)
+                    alarmManager?.setAlarmClock(alarmClockInfo, pendingIntent)
+                    Log.i(TAG, "Resurrection alarm scheduled via setAlarmClock (exempt from Android 12+ FGS restrictions)")
+                    return
+                } catch (e: Throwable) {
+                    Log.w(TAG, "setAlarmClock failed: ${e.message}, falling back to setExactAndAllowWhileIdle")
+                }
+            }
+
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                alarmManager?.setExactAndAllowWhileIdle(
+                    AlarmManager.RTC_WAKEUP,
+                    triggerAt,
+                    pendingIntent
+                )
+            } else {
+                alarmManager?.set(
+                    AlarmManager.RTC_WAKEUP,
+                    triggerAt,
+                    pendingIntent
+                )
+            }
+            Log.i(TAG, "Resurrection alarm scheduled in 1000ms via BootReceiver")
+        } catch (e: Throwable) {
+            Log.w(TAG, "Failed to schedule resurrection alarm: ${e.message}")
         }
-        
-        super.onTaskRemoved(rootIntent)
     }
 
     private fun startZeroBatterySilentAudioTrick() {
@@ -452,8 +611,15 @@ class BackgroundVoiceService : Service(), GeminiLiveListener, ToolCallListener {
 
             silentMediaPlayer = MediaPlayer().apply {
                 setDataSource(silentFile.absolutePath)
+                setAudioAttributes(
+                    AudioAttributes.Builder()
+                        .setUsage(AudioAttributes.USAGE_UNKNOWN)
+                        .setContentType(AudioAttributes.CONTENT_TYPE_UNKNOWN)
+                        .build()
+                )
                 setVolume(0f, 0f)
                 isLooping = true
+                setOnErrorListener { _, _, _ -> true }
                 prepare()
                 start()
             }
@@ -472,16 +638,22 @@ class BackgroundVoiceService : Service(), GeminiLiveListener, ToolCallListener {
         if (granted) {
             // Re-call startForegroundService now that we have permission, so the OS adds the microphone FGS type
             startForegroundService()
-            if (connectionState.value == ConnectionState.Live) {
+            if (::audioRecorder.isInitialized && connectionState.value == ConnectionState.Live && !audioRecorder.isRecordingActive) {
                 audioRecorder.startRecording()
             }
         }
     }
 
     fun connect() {
-        if (isPaused.value) {
-            Log.i(TAG, "connect() ignored because service is paused.")
-            return
+        if (appSettings.isAppPaused) {
+            Log.i(TAG, "connect() called while appSettings.isAppPaused; clearing pause state.")
+            appSettings.isAppPaused = false
+            _isAppPaused.value = false
+        }
+        if (_isLitePaused.value || _isHardPaused.value) {
+            Log.i(TAG, "connect() called while service is paused; clearing pause states.")
+            _isLitePaused.value = false
+            _isHardPaused.value = false
         }
         _isSleeping.value = false
         geminiLiveManager.connect()
@@ -682,6 +854,122 @@ class BackgroundVoiceService : Service(), GeminiLiveListener, ToolCallListener {
     fun exitPauseMode() = if (_isLitePaused.value) exitLitePauseMode() else exitHardPauseMode()
     fun togglePauseMode() = toggleLitePauseMode()
 
+    // ── Master App Pause ─────────────────────────────────────────────────────
+    /**
+     * Master App Pause:
+     *   - Persistently sets isAppPaused = true in AppSettings.
+     *   - Completely shuts down microphone recording (AudioRecord freed).
+     *   - Stops audio playback and cancels active WakeLock.
+     *   - Fully disconnects Gemini Live WebSocket.
+     *   - Stops WakeWordEngine.
+     *   - Stops and dismisses OverlayService (no floating orb or avatar).
+     *   - Cancels any scheduled background resurrection alarms.
+     *   - Silences AccessibilityService.
+     *   - Updates notification to indicate paused status.
+     */
+    fun pauseApp() {
+        Log.i(TAG, "Master App Pause activated — completely pausing Soltini")
+        if (::appSettings.isInitialized) {
+            appSettings.isAppPaused = true
+        }
+        _isAppPaused.value = true
+        _isSleeping.value = true
+
+        try {
+            if (::audioRecorder.isInitialized) audioRecorder.stopRecording()
+            audioPlayer.stop()
+        } catch (e: Exception) {
+            Log.w(TAG, "Error stopping audio on pause: ${e.message}")
+        }
+
+        try {
+            if (::geminiLiveManager.isInitialized) geminiLiveManager.disconnect()
+        } catch (e: Exception) {
+            Log.w(TAG, "Error disconnecting Gemini on pause: ${e.message}")
+        }
+
+        try {
+            if (::wakeWordEngine.isInitialized) wakeWordEngine.stop()
+        } catch (e: Exception) {
+            Log.w(TAG, "Error stopping wake word on pause: ${e.message}")
+        }
+
+        wakeLock?.let { if (it.isHeld) it.release() }
+
+        // Cancel any pending resurrection alarms
+        try {
+            val restartIntent = Intent(applicationContext, BootReceiver::class.java).apply {
+                action = "com.soltini.app.RESTART_SERVICE"
+                setPackage(packageName)
+            }
+            val pendingIntent = PendingIntent.getBroadcast(
+                applicationContext,
+                1002,
+                restartIntent,
+                PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+            )
+            val alarmManager = getSystemService(Context.ALARM_SERVICE) as? AlarmManager
+            alarmManager?.cancel(pendingIntent)
+        } catch (e: Exception) {
+            Log.w(TAG, "Error canceling resurrection alarm: ${e.message}")
+        }
+
+        // Stop OverlayService completely
+        try {
+            OverlayService.stop(this)
+        } catch (e: Exception) {
+            Log.w(TAG, "Error stopping overlay on pause: ${e.message}")
+        }
+
+        // Put accessibility into silent dormancy — zero interaction with device,
+        // without calling disableSelf() so permission is preserved and never needs re-granting
+        com.soltini.app.agent.SoltiniAccessibilityService.getInstance()?.isPausedLite = true
+        com.soltini.app.agent.SoltiniAccessibilityService.getInstance()?.isToolCallActive = false
+
+        updateNotification("⏸ Soltini is Paused — Tap to open and resume")
+    }
+
+    fun resumeApp() {
+        Log.i(TAG, "Master App Resumed — restoring normal assistant operations")
+        appSettings.isAppPaused = false
+        _isAppPaused.value = false
+        _isSleeping.value = false
+        _isLitePaused.value = false
+        _isHardPaused.value = false
+
+        // Instantly reactivate accessibility — no Android Settings re-grant needed
+        com.soltini.app.agent.SoltiniAccessibilityService.getInstance()?.isPausedLite = false
+
+        if (wakeLock?.isHeld == false) wakeLock?.acquire(10 * 60 * 1000L)
+
+        if (appSettings.isWakeWordEnabled) {
+            try {
+                wakeWordEngine.start()
+            } catch (e: Exception) {
+                Log.w(TAG, "Error restarting wake word on resume: ${e.message}")
+            }
+        }
+
+        if (android.provider.Settings.canDrawOverlays(this)) {
+            try {
+                OverlayService.start(this)
+            } catch (e: Exception) {
+                Log.w(TAG, "Error starting overlay on resume: ${e.message}")
+            }
+        }
+
+        updateNotification("Your AI Assistant is ready")
+        connect()
+    }
+
+    fun toggleAppPause() {
+        if (_isAppPaused.value || appSettings.isAppPaused) {
+            resumeApp()
+        } else {
+            pauseApp()
+        }
+    }
+
     /**
      * Puts Soltini into 100% sleep:
      *   - Stops microphone recording (AudioRecord released)
@@ -697,8 +985,14 @@ class BackgroundVoiceService : Service(), GeminiLiveListener, ToolCallListener {
         Log.i(TAG, "Soltini going to sleep — full power-down")
         _isSleeping.value = true
 
-        // Stop all audio hardware
-        audioRecorder.stopRecording()
+        // Keep mic alive if wake word detection is enabled so WakeWordEngine
+        // can still hear the user say "Hey Soltini" / "Hey Maya" in standby.
+        // The audioRecorder callback already guards: when _isSleeping==true it only
+        // feeds wakeWordEngine.processAudioFrame() and does NOT send to Gemini.
+        if (!appSettings.isWakeWordEnabled) {
+            audioRecorder.stopRecording()
+        }
+
         audioPlayer.stop()
 
         // Cut the WebSocket and shut down the OkHttp thread pool
@@ -721,10 +1015,19 @@ class BackgroundVoiceService : Service(), GeminiLiveListener, ToolCallListener {
     fun wakeUp() {
         Log.i(TAG, "Soltini waking up from sleep")
         _isSleeping.value = false
+        _isMuted.value = false
+        audioRecorder.isMuted = false
 
         // Reacquire WakeLock so the CPU stays on during voice session
         if (wakeLock?.isHeld == false) {
             wakeLock?.acquire(10 * 60 * 1000L)
+        }
+
+        // Start microphone IMMEDIATELY — do not wait for WebSocket Live state.
+        // GeminiLiveManager buffers audio chunks in pendingChunks until setupComplete,
+        // so every word the user speaks during the ~1-3s connection handshake is captured.
+        if (_hasMicPermission.value && !audioRecorder.isRecordingActive) {
+            audioRecorder.startRecording()
         }
 
         connect()
@@ -751,70 +1054,394 @@ class BackgroundVoiceService : Service(), GeminiLiveListener, ToolCallListener {
     override fun onToolCall(callId: String, toolName: String, args: JSONObject) {
         Log.i(TAG, "Tool call received: $toolName (callId=$callId) | args: $args")
 
-        if (toolName == "sleep_agent") {
-            sleep()
-            return
-        }
-
-        if (toolName == "trigger_automation") {
-            val request = args.optString("request", "")
-            Log.i(TAG, "Triggering background automation agent for request: \"$request\"")
-
-            // 1. Immediately acknowledge to Live Voice model so it says "I'm on it!" without delay
+        if (toolName == "sleep_agent" || (toolName == "delegate_skill" && (args.optString("skill_name").contains("sleep") || args.optString("action").contains("sleep")))) {
             geminiLiveManager.sendToolResponse(
                 callId,
                 toolName,
                 JSONObject().apply {
-                    put("status", "in_progress")
-                    put("message", "Automation task triggered for: \"$request\". Tell the user you are working on it now (e.g. \"I'm on it!\" or \"Working on that now!\"). Do NOT say it is already finished yet.")
+                    put("status", "success")
+                    put("message", "Going to sleep now. Call me anytime by saying Hey Soltini.")
                 }
             )
-
-            // 2. Execute background agent loop asynchronously
-            serviceScope.launch(Dispatchers.IO) {
-                val count = activeToolCallCount.incrementAndGet()
-                if (count == 1) {
-                    com.soltini.app.agent.SoltiniAccessibilityService.getInstance()?.isToolCallActive = true
-                }
-                try {
-                    val summary = backgroundAgentRunner.execute(request)
-                    Log.i(TAG, "Background automation finished with summary: $summary")
-                    geminiLiveManager.sendClientContent(
-                        "[SYSTEM NOTIFICATION: Background automation completed for request: \"$request\". Outcome: $summary. Confirm execution to the user now in a brief, friendly way!]"
-                    )
-                } catch (e: Exception) {
-                    Log.e(TAG, "Background automation failed: ${e.message}", e)
-                    geminiLiveManager.sendClientContent(
-                        "[SYSTEM NOTIFICATION: Background automation failed for request: \"$request\" with error: ${e.message}. Briefly inform the user.]"
-                    )
-                } finally {
-                    val remaining = activeToolCallCount.decrementAndGet()
-                    if (remaining <= 0) {
-                        activeToolCallCount.set(0)
-                        com.soltini.app.agent.SoltiniAccessibilityService.getInstance()?.isToolCallActive = false
-                    }
-                }
-            }
+            sleep()
             return
         }
 
-        // Direct device tools (open_app, lock_device, wake_device, press_back, press_home, press_recents)
-        serviceScope.launch(Dispatchers.IO) {
-            Log.i(TAG, "Executing direct tool: $toolName (callId=$callId)")
+        val actionName = when {
+            toolName == "delegate_skill" -> {
+                val act = args.optString("action").ifBlank { args.optString("skill_name", "action") }
+                val det = args.optString("details")
+                if (det.isNotBlank()) "$act ($det)" else act
+            }
+            toolName == "trigger_automation" -> args.optString("details").ifBlank { args.optString("request", "automation task") }
+            else -> toolName
+        }
 
+        // Phase 1: Immediately acknowledge tool call with in_progress so Gemini Live gives
+        // an instant (<300ms) ultra-low-latency voice acknowledgement ("On it!", "Sure thing!").
+        geminiLiveManager.sendToolResponse(
+            callId,
+            toolName,
+            JSONObject().apply {
+                put("status", "in_progress")
+                put("message", "Action '$actionName' is in progress. Immediately acknowledge briefly to the user.")
+            }
+        )
+
+        // Phase 2: Execute tool in background and verbally speak the outcome (success or error details)
+        serviceScope.launch(SoltiniDispatchers.AgentWorkerDispatcher) {
             val count = activeToolCallCount.incrementAndGet()
             if (count == 1) {
                 com.soltini.app.agent.SoltiniAccessibilityService.getInstance()?.isToolCallActive = true
             }
 
             try {
-                val result = agentToolExecutor.execute(toolName, args)
-                geminiLiveManager.sendToolResponse(callId, toolName, result)
+                val result = if (toolName == "trigger_automation" || (toolName == "delegate_skill" && (args.optString("skill_name").lowercase() == "automation" || args.optString("action").lowercase() == "trigger_automation"))) {
+                    val req = args.optString("details").ifBlank { args.optString("request", "automation task") }
+                    val summary = backgroundAgentRunner.execute(req)
+                    JSONObject().apply {
+                        put("status", "success")
+                        put("message", summary)
+                    }
+                } else if (toolName == "delegate_skill") {
+                    executeDelegatedSkill(args)
+                } else {
+                    agentToolExecutor.execute(toolName, args)
+                }
+
+                // If Gemini is still speaking its initial acknowledgement, wait briefly for it to finish
+                // so the completion speech doesn't collide or cut off the initial words.
+                val waitStart = System.currentTimeMillis()
+                while (audioPlayer.isSpeaking.value && (System.currentTimeMillis() - waitStart < 2500)) {
+                    kotlinx.coroutines.delay(100)
+                }
+                kotlinx.coroutines.delay(100)
+
+                val status = result.optString("status", if (result.has("error")) "error" else "success")
+                val message = result.optString("message", result.optString("error", "Completed"))
+                val error = result.optString("error", "")
+
+                if (status == "success" && error.isBlank()) {
+                    geminiLiveManager.sendClientContent(
+                        "[SYSTEM NOTIFICATION: Action '$actionName' succeeded. Outcome: $message. Speak to the user confirming what was done.]"
+                    )
+                } else {
+                    val failReason = if (error.isNotBlank()) error else message
+                    geminiLiveManager.sendClientContent(
+                        "[SYSTEM NOTIFICATION: Action '$actionName' failed. Error: $failReason. Message: $message. Speak to the user clearly explaining what failed, why it failed, and what is needed to fix it.]"
+                    )
+                }
+            } catch (e: Exception) {
+                Log.e(TAG, "Tool execution exception for $toolName: ${e.message}", e)
+                geminiLiveManager.sendClientContent(
+                    "[SYSTEM NOTIFICATION: Action '$actionName' failed with exception: ${e.message ?: "Unknown error"}. Inform the user what failed and why.]"
+                )
             } finally {
                 val remaining = activeToolCallCount.decrementAndGet()
                 if (remaining <= 0) {
                     activeToolCallCount.set(0)
                     com.soltini.app.agent.SoltiniAccessibilityService.getInstance()?.isToolCallActive = false
+                }
+            }
+        }
+    }
+
+    private suspend fun executeDelegatedSkill(args: JSONObject): JSONObject {
+        val skillName = args.optString("skill_name").ifBlank { args.optString("skill", "") }.lowercase().trim()
+        val action = args.optString("action", "").lowercase().trim()
+        val details = args.optString("details").ifBlank { args.optString("detail", "") }.trim()
+        val full = "$skillName $action ${details.lowercase()}".trim()
+
+        Log.i(TAG, "executeDelegatedSkill: skill=$skillName, action=$action, details=$details (full='$full')")
+
+        return when {
+            // ── 1. Sleep / Standby ───────────────────────────────────────────
+            full.contains("sleep") -> {
+                serviceScope.launch(Dispatchers.Main) { sleep() }
+                JSONObject().apply {
+                    put("status", "success")
+                    put("message", "Going to sleep now.")
+                }
+            }
+
+            // ── 2. Flashlight / Torch ────────────────────────────────────────
+            full.contains("flashlight") || full.contains("torch") || full.contains("flash_light") ||
+                action in listOf("toggle_flashlight", "flashlight", "torch") ||
+                (full.contains("flash") && !full.contains("camera")) -> {
+                val turnOff = full.contains("off") || full.contains("disable") || full.contains("stop") || full.contains("false")
+                val isToggle = action.contains("toggle") || details.contains("toggle", ignoreCase = true)
+                val targetOn = if (isToggle && !full.contains("on") && !full.contains("off")) null else !turnOff
+                agentToolExecutor.execute("toggle_flashlight", JSONObject().apply {
+                    if (targetOn != null) put("on", targetOn)
+                })
+            }
+
+            // ── 3. Volume & Sound ────────────────────────────────────────────
+            full.contains("volume") || full.contains("sound") || full.contains("loudness") ||
+                action in listOf("set_volume", "volume_up", "volume_down", "mute", "unmute") ||
+                details.contains("volume", ignoreCase = true) -> {
+                val subAction = when {
+                    full.contains("mute") && !full.contains("unmute") -> "mute"
+                    full.contains("unmute") -> "unmute"
+                    action == "volume_up" || full.contains("up") || full.contains("increase") || full.contains("raise") -> "up"
+                    action == "volume_down" || full.contains("down") || full.contains("decrease") || full.contains("lower") -> "down"
+                    else -> null
+                }
+                val digits = details.filter { it.isDigit() }.toIntOrNull()
+                agentToolExecutor.execute("set_volume", JSONObject().apply {
+                    if (digits != null) put("level", digits)
+                    if (subAction != null) put("action", subAction)
+                })
+            }
+
+            // ── 4. Brightness ────────────────────────────────────────────────
+            full.contains("brightness") || full.contains("screen light") || action in listOf("set_brightness", "brightness_up", "brightness_down") -> {
+                val subAction = when {
+                    full.contains("max") || full.contains("full") -> "max"
+                    full.contains("min") || full.contains("lowest") -> "min"
+                    action == "brightness_up" || full.contains("up") || full.contains("increase") || full.contains("brighten") -> "up"
+                    action == "brightness_down" || full.contains("down") || full.contains("decrease") || full.contains("dim") -> "down"
+                    else -> null
+                }
+                val digits = details.filter { it.isDigit() }.toIntOrNull()
+                agentToolExecutor.execute("set_brightness", JSONObject().apply {
+                    if (digits != null) put("level", digits)
+                    if (subAction != null) put("action", subAction)
+                })
+            }
+
+            // ── 5. Wi-Fi ─────────────────────────────────────────────────────
+            full.contains("wifi") || full.contains("wi-fi") || full.contains("wlan") -> {
+                val turnOff = full.contains("off") || full.contains("disable") || full.contains("disconnect")
+                agentToolExecutor.execute("toggle_wifi", JSONObject().apply {
+                    put("on", !turnOff)
+                })
+            }
+
+            // ── 6. Bluetooth ─────────────────────────────────────────────────
+            full.contains("bluetooth") || action in listOf("bluetooth", "toggle_bluetooth", "bt") || full.contains(" bt ") -> {
+                val turnOff = full.contains("off") || full.contains("disable") || full.contains("disconnect")
+                agentToolExecutor.execute("toggle_bluetooth", JSONObject().apply {
+                    put("on", !turnOff)
+                })
+            }
+
+            // ── 7. Screen Lock / Wake / Unlock ──────────────────────────────
+            action in listOf("lock", "lock_device", "lock_screen") || full.contains("lock screen") || full.contains("lock phone") || full.contains("lock device") -> {
+                agentToolExecutor.execute("lock_device", JSONObject())
+            }
+            action in listOf("wake", "wake_device", "wake_screen") || full.contains("wake screen") || full.contains("wake phone") || full.contains("wake device") -> {
+                agentToolExecutor.execute("wake_device", JSONObject())
+            }
+            action in listOf("unlock", "unlock_and_wake") || full.contains("unlock phone") || full.contains("unlock device") -> {
+                agentToolExecutor.execute("unlock_and_wake", JSONObject())
+            }
+
+            // ── 8. Navigation Buttons ────────────────────────────────────────
+            action in listOf("back", "press_back", "go_back") || full.contains("go back") || full.contains("press back") -> {
+                agentToolExecutor.execute("press_back", JSONObject())
+            }
+            action in listOf("home", "press_home", "go_home") || full.contains("go home") || full.contains("press home") -> {
+                agentToolExecutor.execute("press_home", JSONObject())
+            }
+            action in listOf("recents", "press_recents", "recent_apps", "app_switch") || full.contains("recents") || full.contains("switch app") -> {
+                agentToolExecutor.execute("press_recents", JSONObject())
+            }
+
+            // ── 9. Screen Perception & Vision ────────────────────────────────
+            skillName.contains("screen") || skillName.contains("vision") || action.contains("screen") || action.contains("vision") ||
+                action.contains("screenshot") || full.contains("see screen") || full.contains("read screen") || full.contains("take screenshot") -> {
+                when {
+                    action.contains("compact") || full.contains("compact") ->
+                        agentToolExecutor.execute("read_compact_screen", JSONObject())
+                    action.contains("read") || full.contains("read screen") ->
+                        agentToolExecutor.execute("read_screen", JSONObject().apply { put("screenshot", false) })
+                    action.contains("screenshot") || full.contains("screenshot") ->
+                        agentToolExecutor.execute("take_screenshot", JSONObject())
+                    else ->
+                        agentToolExecutor.execute("see_screen", JSONObject().apply { put("screenshot", true) })
+                }
+            }
+
+            // ── 10. UI Actions (Click, Tap, Type, Scroll, Swipe) ─────────────
+            action in listOf("click", "tap", "click_element") -> {
+                val target = details.ifBlank { action.substringAfter("click").substringAfter("tap").trim() }
+                agentToolExecutor.execute("click_element", JSONObject().apply { put("text", target) })
+            }
+            action == "tap_screen" -> {
+                agentToolExecutor.execute("tap_screen", args)
+            }
+            action in listOf("type", "type_text") -> {
+                agentToolExecutor.execute("type_text", JSONObject().apply { put("text", details) })
+            }
+            action in listOf("clear", "clear_text") -> {
+                agentToolExecutor.execute("clear_text", JSONObject())
+            }
+            action in listOf("scroll_down", "scroll_up") -> {
+                agentToolExecutor.execute(action, JSONObject())
+            }
+            action in listOf("swipe", "swipe_screen") -> {
+                agentToolExecutor.execute("swipe_screen", args)
+            }
+
+            // ── 11. Phone Calls ──────────────────────────────────────────────
+            skillName.contains("phone") || skillName.contains("call") || action in listOf("call", "make_phone_call", "dial", "answer_call", "decline_call") -> {
+                when {
+                    action in listOf("answer", "answer_call") || full.contains("answer call") ->
+                        agentToolExecutor.execute("answer_call", JSONObject())
+                    action in listOf("decline", "decline_call", "reject") || full.contains("decline call") || full.contains("reject call") ->
+                        agentToolExecutor.execute("decline_call", JSONObject())
+                    else -> {
+                        val target = details.ifBlank { action.substringAfter("call").trim() }
+                        agentToolExecutor.execute("make_phone_call", JSONObject().apply {
+                            put("phone_number", target)
+                            put("contact_name", target)
+                        })
+                    }
+                }
+            }
+
+            // ── 12. Contacts & Call Log ──────────────────────────────────────
+            action in listOf("read_contacts", "contacts", "search_contact") || (details.contains("contact") && !full.contains("whatsapp")) -> {
+                agentToolExecutor.execute("read_contacts", JSONObject().apply { put("query", details) })
+            }
+            action in listOf("read_call_log", "call_log", "recent_calls") || full.contains("call log") -> {
+                val limit = details.filter { it.isDigit() }.toIntOrNull() ?: 5
+                agentToolExecutor.execute("read_call_log", JSONObject().apply { put("limit", limit) })
+            }
+
+            // ── 13. Notifications & SMS ──────────────────────────────────────
+            action in listOf("read_notifications", "notifications") || full.contains("read notification") -> {
+                agentToolExecutor.execute("read_notifications", JSONObject().apply { put("package_name", details) })
+            }
+            action in listOf("send_sms", "sms", "text", "send_text") -> {
+                val parts = details.split(":", limit = 2)
+                val target = parts.firstOrNull()?.trim() ?: ""
+                val msg = parts.getOrNull(1)?.trim() ?: ""
+                agentToolExecutor.execute("send_sms", JSONObject().apply {
+                    put("phone_number", target)
+                    put("message", msg)
+                })
+            }
+
+            // ── 14. Alarms, Reminders, Maps & Location ───────────────────────
+            action in listOf("set_alarm", "alarm") || full.contains("set alarm") -> {
+                val digits = details.filter { it.isDigit() }
+                val hour = if (digits.length >= 3) digits.take(2).toIntOrNull() ?: 8 else digits.toIntOrNull() ?: 8
+                val minute = if (digits.length >= 4) digits.substring(2, 4).toIntOrNull() ?: 0 else 0
+                agentToolExecutor.execute("set_alarm", JSONObject().apply {
+                    put("hour", hour)
+                    put("minute", minute)
+                    put("label", details)
+                })
+            }
+            action in listOf("schedule_reminder", "reminder", "remind") || full.contains("remind me") -> {
+                agentToolExecutor.execute("schedule_reminder", JSONObject().apply { put("message", details) })
+            }
+            action in listOf("get_location", "location", "gps") || full.contains("where am i") || full.contains("my location") -> {
+                agentToolExecutor.execute("get_location", JSONObject())
+            }
+            action in listOf("maps", "open_google_maps", "navigate", "directions") || full.contains("google maps") -> {
+                agentToolExecutor.execute("open_google_maps", JSONObject().apply { put("query", details) })
+            }
+            action in listOf("set_do_not_disturb", "dnd", "silent_mode") || full.contains("do not disturb") -> {
+                agentToolExecutor.execute("set_do_not_disturb", JSONObject().apply { put("on", !full.contains("off")) })
+            }
+
+            // ── 15. YouTube ──────────────────────────────────────────────────
+            skillName.contains("youtube") || action.startsWith("youtube_") -> {
+                when (action) {
+                    "search", "youtube_search" -> agentToolExecutor.execute("youtube_search", JSONObject().apply { put("query", details) })
+                    "open", "open_video", "play_video", "youtube_open_video" -> agentToolExecutor.execute("youtube_open_video", JSONObject().apply { put("video_id", details) })
+                    "play", "pause", "play_pause", "youtube_play_pause" -> agentToolExecutor.execute("youtube_play_pause", JSONObject())
+                    "seek", "youtube_seek" -> agentToolExecutor.execute("youtube_seek", JSONObject().apply { put("seconds", details.filter { it.isDigit() }.toIntOrNull() ?: 10) })
+                    "next", "youtube_next" -> agentToolExecutor.execute("youtube_next", JSONObject())
+                    "previous", "prev", "youtube_previous" -> agentToolExecutor.execute("youtube_previous", JSONObject())
+                    "like", "youtube_like" -> agentToolExecutor.execute("youtube_like", JSONObject())
+                    "dislike", "youtube_dislike" -> agentToolExecutor.execute("youtube_dislike", JSONObject())
+                    "subscribe", "youtube_subscribe" -> agentToolExecutor.execute("youtube_subscribe", JSONObject())
+                    "skip_ad", "youtube_skip_ad" -> agentToolExecutor.execute("youtube_skip_ad", JSONObject())
+                    "fullscreen", "youtube_fullscreen" -> agentToolExecutor.execute("youtube_fullscreen", JSONObject())
+                    "captions", "youtube_captions" -> agentToolExecutor.execute("youtube_captions", JSONObject())
+                    "mute", "youtube_mute" -> agentToolExecutor.execute("youtube_mute", JSONObject())
+                    "read_screen", "read_youtube_screen" -> agentToolExecutor.execute("read_youtube_screen", JSONObject())
+                    else -> agentToolExecutor.execute("youtube_search", JSONObject().apply { put("query", details.ifBlank { action }) })
+                }
+            }
+
+            // ── 16. WhatsApp ─────────────────────────────────────────────────
+            skillName.contains("whatsapp") || action.startsWith("whatsapp_") -> {
+                when {
+                    action.contains("call") -> {
+                        val isVideo = action.contains("video") || details.contains("video", ignoreCase = true)
+                        agentToolExecutor.execute("whatsapp_call", JSONObject().apply {
+                            put("contact_name", details.replace("video", "", ignoreCase = true).trim())
+                            put("is_video", isVideo)
+                        })
+                    }
+                    else -> {
+                        var contact = details
+                        var message = ""
+                        if (details.contains(":")) {
+                            contact = details.substringBefore(":").trim()
+                            message = details.substringAfter(":").trim()
+                        }
+                        agentToolExecutor.execute("whatsapp_send_message", JSONObject().apply {
+                            put("contact_name", contact)
+                            put("message", message)
+                        })
+                    }
+                }
+            }
+
+            // ── 17. Reels & Shorts ───────────────────────────────────────────
+            skillName.contains("reel") || skillName.contains("short") || action in listOf("next_reel", "previous_reel") -> {
+                if (action.contains("prev") || full.contains("prev")) {
+                    agentToolExecutor.execute("previous_reel", JSONObject())
+                } else {
+                    agentToolExecutor.execute("next_reel", JSONObject())
+                }
+            }
+
+            // ── 18. Macros & Termux ──────────────────────────────────────────
+            skillName.contains("macro") || action in listOf("run_macro", "get_available_macros") -> {
+                if (action == "get_available_macros") {
+                    agentToolExecutor.execute("get_available_macros", JSONObject())
+                } else {
+                    agentToolExecutor.execute("run_macro", JSONObject().apply { put("macro_name", details) })
+                }
+            }
+            skillName.contains("termux") || action in listOf("run_termux_command", "termux", "terminal", "bash") -> {
+                agentToolExecutor.execute("run_termux_command", JSONObject().apply { put("command", details) })
+            }
+
+            // ── 19. Open App ─────────────────────────────────────────────────
+            skillName in listOf("open_app", "app") || action in listOf("open", "launch", "open_app", "launch_app", "start_app") -> {
+                val target = details.ifBlank { action.substringAfter("open").substringAfter("launch").trim() }
+                agentToolExecutor.execute("open_app", JSONObject().apply { put("app_name", target) })
+            }
+
+            // ── 20. Direct Tool Name Fallback ────────────────────────────────
+            action in com.soltini.app.agent.AgentToolExecutor.SUPPORTED_TOOLS -> {
+                agentToolExecutor.execute(action, args)
+            }
+
+            // ── 21. Open App as smart fallback if target is named ───────────
+            details.isNotBlank() && (action.isBlank() || action in listOf("run", "start")) -> {
+                agentToolExecutor.execute("open_app", JSONObject().apply { put("app_name", details) })
+            }
+
+            // ── 22. Autonomous Agent Runner Fallback ─────────────────────────
+            else -> {
+                try {
+                    agentToolExecutor.execute(action, args)
+                } catch (e: Exception) {
+                    val fallbackReq = if (details.isNotBlank()) "$skillName $action $details" else "$skillName $action"
+                    val summary = backgroundAgentRunner.execute(fallbackReq)
+                    JSONObject().apply {
+                        put("status", "success")
+                        put("message", summary)
+                    }
                 }
             }
         }
@@ -850,6 +1477,7 @@ class BackgroundVoiceService : Service(), GeminiLiveListener, ToolCallListener {
 
     override fun onTurnComplete() {
         Log.d(TAG, "Gemini turn completed")
+        audioPlayer.markTurnComplete()
         // Capture the finished transcript before clearing, then extract memories
         val finishedText = currentGeminiTranscript.toString().trim()
         currentGeminiTranscript.clear()
@@ -857,9 +1485,16 @@ class BackgroundVoiceService : Service(), GeminiLiveListener, ToolCallListener {
             // Show AI response as floating bubble on the overlay orb (Maya-style)
             OverlayService.getInstance()?.showResponseBubble(finishedText)
 
-            serviceScope.launch(Dispatchers.IO) {
+            val lastUserPrompt = _transcripts.value.lastOrNull { it.sender == TranscriptEntry.Sender.USER }?.text ?: ""
+            val fullTurnExcerpt = if (lastUserPrompt.isNotBlank()) {
+                "User: $lastUserPrompt\nSoltini: $finishedText"
+            } else {
+                finishedText
+            }
+
+            serviceScope.launch(SoltiniDispatchers.AgentWorkerDispatcher) {
                 try {
-                    memoryManager.extractAndSave(finishedText)
+                    memoryManager.extractAndSave(fullTurnExcerpt)
                 } catch (e: Exception) {
                     Log.w(TAG, "Memory extraction error (non-fatal): ${e.message}")
                 }
@@ -875,6 +1510,7 @@ class BackgroundVoiceService : Service(), GeminiLiveListener, ToolCallListener {
     }
 
     override fun onDestroy() {
+        instance = null
         super.onDestroy()
 
         try {
@@ -887,9 +1523,18 @@ class BackgroundVoiceService : Service(), GeminiLiveListener, ToolCallListener {
             if (it.isHeld) it.release()
         }
 
-        audioRecorder.stopRecording()
-        audioPlayer.stop()
-        geminiLiveManager.disconnect()
+        try {
+            if (::audioRecorder.isInitialized) audioRecorder.stopRecording()
+        } catch (e: Exception) { /* ignore */ }
+        try {
+            audioPlayer.stop()
+        } catch (e: Exception) { /* ignore */ }
+        try {
+            if (::geminiLiveManager.isInitialized) geminiLiveManager.disconnect()
+        } catch (e: Exception) { /* ignore */ }
+        try {
+            if (::wakeWordEngine.isInitialized) wakeWordEngine.stop()
+        } catch (e: Exception) { /* ignore */ }
     }
 
     private fun buildNotification(text: String): android.app.Notification {
@@ -900,13 +1545,39 @@ class BackgroundVoiceService : Service(), GeminiLiveListener, ToolCallListener {
             this, 0, tapIntent,
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
         )
-        return NotificationCompat.Builder(this, CHANNEL_ID)
-            .setContentTitle("Soltini")
+        val builder = NotificationCompat.Builder(this, CHANNEL_ID)
+            .setContentTitle("LUCY")
             .setContentText(text)
             .setSmallIcon(android.R.drawable.ic_btn_speak_now)
             .setContentIntent(tapPendingIntent)
             .setOngoing(true)
-            .build()
+
+        val isPaused = if (::appSettings.isInitialized) {
+            _isAppPaused.value || appSettings.isAppPaused
+        } else {
+            _isAppPaused.value
+        }
+        if (isPaused) {
+            val resumeIntent = Intent(this, BackgroundVoiceService::class.java).apply {
+                action = ACTION_RESUME_APP
+            }
+            val resumePendingIntent = PendingIntent.getService(
+                this, 101, resumeIntent,
+                PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+            )
+            builder.addAction(android.R.drawable.ic_media_play, "▶ Resume App", resumePendingIntent)
+        } else {
+            val pauseIntent = Intent(this, BackgroundVoiceService::class.java).apply {
+                action = ACTION_PAUSE_APP
+            }
+            val pausePendingIntent = PendingIntent.getService(
+                this, 102, pauseIntent,
+                PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+            )
+            builder.addAction(android.R.drawable.ic_media_pause, "⏸ Pause App", pausePendingIntent)
+        }
+
+        return builder.build()
     }
 
     private fun updateNotification(text: String) {
@@ -917,17 +1588,64 @@ class BackgroundVoiceService : Service(), GeminiLiveListener, ToolCallListener {
     private fun startForegroundService() {
         val notification = buildNotification("Your AI Assistant is ready")
 
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+        if (Build.VERSION.SDK_INT >= 34) {
+            // Android 14+ (API 34+): Starting FGS with MICROPHONE type from background
+            // causes SecurityException / ForegroundServiceStartNotAllowedException.
+            // When starting from background/boot, start as SPECIAL_USE (defined in manifest with subtype ai_voice_assistant_background).
+            // When the app comes to foreground or user interacts, promoteToMicrophoneFgs() elevates to MICROPHONE.
+            var started = false
+            if (isAppInForeground) {
+                val hasMicPermission = androidx.core.content.ContextCompat.checkSelfPermission(
+                    this,
+                    android.Manifest.permission.RECORD_AUDIO
+                ) == android.content.pm.PackageManager.PERMISSION_GRANTED
+                if (hasMicPermission) {
+                    try {
+                        startForeground(
+                            NOTIFICATION_ID,
+                            notification,
+                            android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE
+                        )
+                        started = true
+                    } catch (e: Exception) {
+                        Log.w(TAG, "Foreground start with MICROPHONE failed, will fallback to SPECIAL_USE: ${e.message}")
+                    }
+                }
+            }
+            if (!started) {
+                try {
+                    // FOREGROUND_SERVICE_TYPE_SPECIAL_USE = 0x40000000 (1073741824)
+                    startForeground(
+                        NOTIFICATION_ID,
+                        notification,
+                        1073741824
+                    )
+                } catch (e: Exception) {
+                    Log.w(TAG, "startForeground with SPECIAL_USE failed: ${e.message}")
+                    try {
+                        startForeground(NOTIFICATION_ID, notification)
+                    } catch (fatal: Exception) {
+                        Log.e(TAG, "Fatal startForeground error: ${fatal.message}", fatal)
+                    }
+                }
+            }
+        } else if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
             val hasMicPermission = androidx.core.content.ContextCompat.checkSelfPermission(
                 this,
                 android.Manifest.permission.RECORD_AUDIO
             ) == android.content.pm.PackageManager.PERMISSION_GRANTED
-            
-            if (hasMicPermission && Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-                startForeground(NOTIFICATION_ID, notification, android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE)
-            } else if (Build.VERSION.SDK_INT >= 34) {
-                startForeground(NOTIFICATION_ID, notification, 1073741824)
-            } else {
+            try {
+                if (hasMicPermission) {
+                    startForeground(
+                        NOTIFICATION_ID,
+                        notification,
+                        android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE
+                    )
+                } else {
+                    startForeground(NOTIFICATION_ID, notification)
+                }
+            } catch (e: Exception) {
+                Log.w(TAG, "startForeground with MICROPHONE failed: ${e.message}")
                 startForeground(NOTIFICATION_ID, notification)
             }
         } else {

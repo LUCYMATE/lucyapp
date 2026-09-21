@@ -6,14 +6,20 @@ import android.media.AudioRecord
 import android.media.MediaRecorder
 import android.media.audiofx.AcousticEchoCanceler
 import android.media.audiofx.NoiseSuppressor
+import com.soltini.app.core.SoltiniDispatchers
 import com.soltini.app.util.AppLogger
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.channels.BufferOverflow
+import kotlinx.coroutines.channels.Channel
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.yield
 import kotlin.math.abs
 
 /**
@@ -33,18 +39,21 @@ class AudioRecorder(
 
     private var audioRecord: AudioRecord? = null
     private var recordingJob: Job? = null
+    private var chunkDeliveryJob: Job? = null
+    private var chunkChannel: Channel<ByteArray>? = null
     private var isRecording = false
+    val isRecordingActive: Boolean get() = isRecording
 
     private var aec: AcousticEchoCanceler? = null
     private var ns: NoiseSuppressor? = null
 
     var isMuted = false
-    var isDataSaverEnabled: Boolean = true
+    var isDataSaverEnabled: Boolean = false
     var vadThreshold: Float = 0.010f
     var micGain: Float = 1.5f
     var isModelSpeaking: Boolean = false
     var isScreenRecordingModeEnabled: Boolean = false
-    var audioSourcePreference: String = "MIC"
+    var audioSourcePreference: String = "VOICE_COMMUNICATION"
 
     // Auto-calibrating ambient noise floor
     private var ambientNoiseFloor: Float = 0.005f
@@ -122,10 +131,39 @@ class AudioRecorder(
             isRecording = true
             AppLogger.i(TAG, "AudioRecord started recording at 16000Hz PCM 16-bit")
 
-            recordingJob = CoroutineScope(Dispatchers.IO).launch {
-                val buffer = ByteArray(2048)
+            // Decouple chunk delivery: channel buffers PCM chunks without blocking AudioRecord read loop
+            val channel = Channel<ByteArray>(
+                capacity = 64,
+                onBufferOverflow = BufferOverflow.DROP_OLDEST
+            )
+            chunkChannel = channel
+
+            chunkDeliveryJob = CoroutineScope(SupervisorJob() + SoltiniDispatchers.LiveWsDispatcher).launch {
+                try {
+                    for (chunk in channel) {
+                        try {
+                            onAudioChunkCaptured(chunk)
+                        } catch (e: Exception) {
+                            AppLogger.w(TAG, "Error in onAudioChunkCaptured: ${e.message}")
+                        }
+                    }
+                } catch (_: kotlinx.coroutines.CancellationException) {
+                    // Normal coroutine cancellation
+                }
+            }
+
+            recordingJob = CoroutineScope(SupervisorJob() + SoltiniDispatchers.MicCaptureDispatcher).launch {
+                // 3200 bytes = 1600 samples = 100ms at 16kHz PCM 16-bit mono.
+                // Reduces WebSocket framing overhead by ~70% compared to 1024-byte chunks.
+                val buffer = ByteArray(3200)
                 var chunkCount = 0
                 var errorCount = 0
+                var zeroAmpStreak = 0
+
+                // In Data Saver mode, send trailing audio for at least 8 chunks (~800ms) after speech
+                // drops below threshold so Gemini server VAD can commit end-of-turn before pausing.
+                var dataSaverHangoverRemaining = 0
+
                 while (isRecording) {
                     val bytesRead = audioRecord?.read(buffer, 0, buffer.size) ?: -1
                     if (bytesRead > 0) {
@@ -134,68 +172,142 @@ class AudioRecorder(
                         val chunk = if (micGain != 1.0f) applySoftGain(rawChunk, micGain) else rawChunk
                         val amp = calculateAmplitude(chunk)
 
+                        // Dead-mic / silenced stream detection:
+                        // Only trigger recovery if the mic has been completely flatline (amp=0.0) for an extended period
+                        // (300 reads = ~30s), preventing spurious teardowns during natural conversational silence.
+                        if (amp == 0f) {
+                            zeroAmpStreak++
+                            if (zeroAmpStreak >= 300 && !isMuted) {
+                                AppLogger.w(TAG, "Microphone silence freeze detected ($zeroAmpStreak frames of amp=0.0). Attempting automatic recovery...")
+                                zeroAmpStreak = 0
+                                restartMicrophone(bufferSize)
+                                continue
+                            }
+                        } else {
+                            zeroAmpStreak = 0
+                        }
+
                         if (!isMuted) {
-                            var outputChunk = chunk
-                            
-                            if (isScreenRecordingModeEnabled && isModelSpeaking) {
-                                // HARD MUTE: When Screen Recording Mode is ON, the mic is completely muted
-                                // while the AI is speaking. isModelSpeaking is now set to false only after
-                                // the AudioTrack hardware buffer fully drains, so this is precise and reliable.
-                                outputChunk = ByteArray(chunk.size)
+                            // If the AI model is currently speaking:
+                            if (isModelSpeaking) {
+                                dataSaverHangoverRemaining = 0
+                                // Allow barge-in / user interruption if speech is loud and clear
+                                val isBargeIn = amp > (vadThreshold * 1.8f)
+                                if (isBargeIn) {
+                                    onSpeechStateChanged?.invoke(true)
+                                    deliverChunk(chunk)
+                                    chunkCount++
+                                } else {
+                                    onSpeechStateChanged?.invoke(false)
+                                    // Suppress sending continuous speaker echo to Gemini
+                                }
+                                yield()
+                                continue
                             }
-                            
-                            onAudioChunkCaptured(outputChunk)
-                            onSpeechStateChanged?.invoke(amp > 0.005f)
-                            chunkCount++
+
+                            val isSpeech = amp > vadThreshold
+                            onSpeechStateChanged?.invoke(isSpeech)
+
+                            if (isDataSaverEnabled) {
+                                if (isSpeech) {
+                                    deliverChunk(chunk)
+                                    dataSaverHangoverRemaining = 8 // ~800ms hangover window (8 * 100ms) for clean turn-commit
+                                    chunkCount++
+                                } else if (dataSaverHangoverRemaining > 0) {
+                                    dataSaverHangoverRemaining--
+                                    deliverChunk(chunk)
+                                    chunkCount++
+                                }
+                            } else {
+                                // Full-speed continuous streaming (identical to Soltini Web):
+                                // Real-time bidirectional voice models (Gemini Live) rely on continuous audio streaming
+                                // and server-side neural VAD to detect natural turn boundaries with ultra-low latency (<500ms).
+                                deliverChunk(chunk)
+                                chunkCount++
+                            }
+
                             if (chunkCount % 100 == 1) {
-                                AppLogger.d(TAG, "AudioRecord captured chunk #$chunkCount ($bytesRead bytes)")
+                                AppLogger.d(TAG, "AudioRecord streaming chunk #$chunkCount ($bytesRead bytes, amp=$amp)")
                             }
+                        } else {
+                            dataSaverHangoverRemaining = 0
                         }
                     } else if (bytesRead < 0) {
                         AppLogger.e(TAG, "AudioRecord read error code: $bytesRead")
                         errorCount++
-                        Thread.sleep(50)
-                        
-                        // If we get consecutive errors (e.g., another app took the mic), try to restart
+                        delay(50)
+
                         if (errorCount > 5) {
                             AppLogger.w(TAG, "Consecutive audio errors. Attempting to restart microphone...")
-                            try {
-                                audioRecord?.stop()
-                                audioRecord?.release()
-                            } catch (e: Exception) {}
-                            
-                            // Try to re-init
-                            try {
-                                audioRecord = AudioRecord(
-                                    MediaRecorder.AudioSource.VOICE_COMMUNICATION,
-                                    SAMPLE_RATE,
-                                    CHANNEL_CONFIG,
-                                    AUDIO_FORMAT,
-                                    bufferSize
-                                )
-                                if (audioRecord?.state != AudioRecord.STATE_INITIALIZED) {
-                                    audioRecord = AudioRecord(
-                                        MediaRecorder.AudioSource.MIC,
-                                        SAMPLE_RATE,
-                                        CHANNEL_CONFIG,
-                                        AUDIO_FORMAT,
-                                        bufferSize
-                                    )
-                                }
-                                audioRecord?.startRecording()
-                                errorCount = 0
-                                AppLogger.i(TAG, "Microphone restarted successfully")
-                            } catch (e: Exception) {
-                                AppLogger.e(TAG, "Failed to restart microphone: ${e.message}")
-                            }
+                            errorCount = 0
+                            restartMicrophone(bufferSize)
                         }
                     }
+                    yield()
                 }
             }
         } catch (e: SecurityException) {
             AppLogger.e(TAG, "RECORD_AUDIO permission missing: ${e.message}", e)
         } catch (e: Exception) {
             AppLogger.e(TAG, "Error starting AudioRecord: ${e.message}", e)
+        }
+    }
+
+    private fun deliverChunk(chunk: ByteArray) {
+        chunkChannel?.trySend(chunk)
+    }
+
+    @SuppressLint("MissingPermission")
+    private fun restartMicrophone(bufferSize: Int) {
+        try {
+            audioRecord?.stop()
+            audioRecord?.release()
+        } catch (_: Exception) {}
+        try {
+            val primarySource = if (audioSourcePreference.equals("VOICE_COMMUNICATION", ignoreCase = true)) {
+                MediaRecorder.AudioSource.VOICE_COMMUNICATION
+            } else {
+                MediaRecorder.AudioSource.MIC
+            }
+            val fallbackSource = if (primarySource == MediaRecorder.AudioSource.VOICE_COMMUNICATION) {
+                MediaRecorder.AudioSource.MIC
+            } else {
+                MediaRecorder.AudioSource.VOICE_COMMUNICATION
+            }
+
+            audioRecord = AudioRecord(
+                primarySource,
+                SAMPLE_RATE,
+                CHANNEL_CONFIG,
+                AUDIO_FORMAT,
+                bufferSize
+            )
+            if (audioRecord?.state != AudioRecord.STATE_INITIALIZED) {
+                audioRecord = AudioRecord(
+                    fallbackSource,
+                    SAMPLE_RATE,
+                    CHANNEL_CONFIG,
+                    AUDIO_FORMAT,
+                    bufferSize
+                )
+            }
+            try {
+                if (AcousticEchoCanceler.isAvailable() && audioRecord != null) {
+                    aec?.release()
+                    aec = AcousticEchoCanceler.create(audioRecord!!.audioSessionId)
+                    aec?.enabled = true
+                }
+                if (NoiseSuppressor.isAvailable() && audioRecord != null) {
+                    ns?.release()
+                    ns = NoiseSuppressor.create(audioRecord!!.audioSessionId)
+                    ns?.enabled = true
+                }
+            } catch (_: Exception) {}
+
+            audioRecord?.startRecording()
+            AppLogger.i(TAG, "Microphone restarted successfully.")
+        } catch (e: Exception) {
+            AppLogger.e(TAG, "Failed to restart microphone: ${e.message}")
         }
     }
 
@@ -234,6 +346,10 @@ class AudioRecorder(
         isRecording = false
         recordingJob?.cancel()
         recordingJob = null
+        chunkDeliveryJob?.cancel()
+        chunkDeliveryJob = null
+        chunkChannel?.close()
+        chunkChannel = null
         try {
             audioRecord?.stop()
             audioRecord?.release()
