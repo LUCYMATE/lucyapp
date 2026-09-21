@@ -1,4 +1,4 @@
-﻿import com.google.gms.googleservices.GoogleServicesPlugin.MissingGoogleServicesStrategy
+import com.google.gms.googleservices.GoogleServicesPlugin.MissingGoogleServicesStrategy
 
 plugins {
   alias(libs.plugins.android.application)
@@ -17,8 +17,8 @@ android {
     applicationId = "com.lucy.mate"
     minSdk = 26
     targetSdk = 36
-    versionCode = 1
-    versionName = "1.0"
+    versionCode = 20
+    versionName = "2.0.0"
 
     testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
   }
@@ -29,12 +29,12 @@ android {
     create("playstore") {
       dimension = "distribution"
       applicationId = "com.lucy.mate"
-      versionName = "1.0.0"
+      versionName = "2.0.0"
     }
     create("standalone") {
       dimension = "distribution"
       applicationId = "com.lucy.mate"
-      versionName = "1.0.0-standalone"
+      versionName = "2.0.0-standalone"
     }
   }
 
