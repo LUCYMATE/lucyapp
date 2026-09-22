@@ -19,13 +19,6 @@
     window.addEventListener("resize", () => {
       console.log("[HTML] window resize: " + window.innerWidth + "x" + window.innerHeight);
     });
-    setInterval(() => {
-      const cont = document.getElementById("canvas-container");
-      const c = document.querySelector("canvas");
-      console.log("[HTML-STATS] container: " + (cont ? cont.clientWidth + "x" + cont.clientHeight : "null") + 
-                  ", canvas: " + (c ? c.width + "x" + c.height + " (style: " + c.style.width + "x" + c.style.height + ")" : "none") +
-                  ", Aria: " + (typeof window.Aria !== "undefined"));
-    }, 2500);
   </script>
 </body>
 </html>

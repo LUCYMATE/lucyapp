@@ -1,4 +1,4 @@
-﻿package com.lucy.mate.ui.components
+package com.lucy.mate.ui.components
 
 import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.core.FastOutSlowInEasing
@@ -15,11 +15,14 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.Path
+import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.unit.dp
 import com.lucy.mate.ui.theme.RosePink
@@ -74,6 +77,18 @@ fun AudioVisualizerOrb(
     val colorCenter by animateColorAsState(targetCenter, tween(500), label = "centerColor")
     val colorEdge by animateColorAsState(targetEdge, tween(500), label = "edgeColor")
 
+    val auraPath = remember { Path() }
+    val corePath = remember { Path() }
+    val vertexX: FloatArray = remember { FloatArray(8) }
+    val vertexY: FloatArray = remember { FloatArray(8) }
+    val colorStops = remember(colorCenter, colorEdge) {
+        arrayOf(
+            0.0f to Color.White,
+            0.4f to colorCenter,
+            0.8f to colorEdge,
+            1.0f to Color.Transparent
+        )
+    }
 
     Box(
         modifier = modifier
@@ -90,47 +105,42 @@ fun AudioVisualizerOrb(
             // Compute an infinite phase for the morphing animation
             val phase = (System.currentTimeMillis() % 10000L) / 10000f * (2 * Math.PI.toFloat())
             
-            // Function to generate a smooth blob path
-            fun createBlobPath(baseR: Float, ampMultiplier: Float = 1f): androidx.compose.ui.graphics.Path {
-                val path = androidx.compose.ui.graphics.Path()
+            // Zero-allocation smooth blob path generator
+            fun updateBlobPath(targetPath: Path, baseR: Float, ampMultiplier: Float = 1f): Path {
+                targetPath.reset()
                 val points = 8
-                val angleStep = Math.PI * 2 / points
-                val vertexes = mutableListOf<Offset>()
+                val angleStep = (Math.PI * 2 / points).toFloat()
                 
                 for (i in 0 until points) {
-                    val angle = (i * angleStep).toFloat()
-                    val wave1 = kotlin.math.sin(angle * 3 + phase).toFloat() * 0.08f
-                    val wave2 = kotlin.math.cos(angle * 2 - phase * 1.5f).toFloat() * 0.12f
+                    val angle = i * angleStep
+                    val wave1 = kotlin.math.sin(angle * 3 + phase) * 0.08f
+                    val wave2 = kotlin.math.cos(angle * 2 - phase * 1.5f) * 0.12f
                     
                     val deformation = (wave1 + wave2) * (1f + animatedAmp * 2.5f * ampMultiplier)
                     val r = baseR * (1f + deformation)
                     
-                    val x = center.x + r * kotlin.math.cos(angle)
-                    val y = center.y + r * kotlin.math.sin(angle)
-                    vertexes.add(Offset(x, y))
+                    vertexX[i] = center.x + r * kotlin.math.cos(angle)
+                    vertexY[i] = center.y + r * kotlin.math.sin(angle)
                 }
                 
                 // Draw smooth curve using midpoints
                 for (i in 0 until points) {
-                    val p1 = vertexes[i]
-                    val p2 = vertexes[(i + 1) % points]
-                    val midX = (p1.x + p2.x) / 2f
-                    val midY = (p1.y + p2.y) / 2f
+                    val next = (i + 1) % points
+                    val midX = (vertexX[i] + vertexX[next]) / 2f
+                    val midY = (vertexY[i] + vertexY[next]) / 2f
                     
                     if (i == 0) {
-                        path.moveTo(midX, midY)
+                        targetPath.moveTo(midX, midY)
                     } else {
-                        path.quadraticTo(p1.x, p1.y, midX, midY)
+                        targetPath.quadraticTo(vertexX[i], vertexY[i], midX, midY)
                     }
                 }
                 // Close the loop smoothly
-                val pFirst = vertexes[0]
-                val pSecond = vertexes[1]
-                val midFirstX = (pFirst.x + pSecond.x) / 2f
-                val midFirstY = (pFirst.y + pSecond.y) / 2f
-                path.quadraticTo(pFirst.x, pFirst.y, midFirstX, midFirstY)
-                path.close()
-                return path
+                val midFirstX = (vertexX[0] + vertexX[1]) / 2f
+                val midFirstY = (vertexY[0] + vertexY[1]) / 2f
+                targetPath.quadraticTo(vertexX[0], vertexY[0], midFirstX, midFirstY)
+                targetPath.close()
+                return targetPath
             }
 
             // 1. Outer faint ring (circle)
@@ -138,23 +148,20 @@ fun AudioVisualizerOrb(
                 color = colorEdge.copy(alpha = 0.15f),
                 radius = currentRadius * 1.8f,
                 center = center,
-                style = androidx.compose.ui.graphics.drawscope.Stroke(width = 2.dp.toPx())
+                style = Stroke(width = 2.dp.toPx())
             )
 
             // 2. Middle aura (morphing blob)
             drawPath(
-                path = createBlobPath(currentRadius * 1.3f, 0.5f),
+                path = updateBlobPath(auraPath, currentRadius * 1.3f, 0.5f),
                 color = colorCenter.copy(alpha = 0.25f)
             )
 
             // 3. Inner core gradient orb (Siri-style morphing blob)
             drawPath(
-                path = createBlobPath(currentRadius, 1f),
+                path = updateBlobPath(corePath, currentRadius, 1f),
                 brush = Brush.radialGradient(
-                    0.0f to Color.White,
-                    0.4f to colorCenter,
-                    0.8f to colorEdge,
-                    1.0f to Color.Transparent,
+                    colorStops = colorStops,
                     center = center,
                     radius = currentRadius * 1.2f
                 )

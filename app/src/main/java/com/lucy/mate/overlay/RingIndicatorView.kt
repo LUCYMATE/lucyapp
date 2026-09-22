@@ -1,4 +1,4 @@
-﻿package com.lucy.mate.overlay
+package com.lucy.mate.overlay
 
 import android.animation.ValueAnimator
 import android.content.Context
@@ -97,28 +97,35 @@ class RingIndicatorView(context: Context) : View(context) {
         }
     }
     
-    private val blobPath = android.graphics.Path()
+    private val points = 8
+    private val angleStep = (Math.PI * 2 / points).toFloat()
+    private val vertexX = FloatArray(points)
+    private val vertexY = FloatArray(points)
+    private val blobPathOuter = android.graphics.Path()
+    private val blobPathMiddle = android.graphics.Path()
+    private val blobPathCore = android.graphics.Path()
 
-    private fun getBlobPath(cx: Float, cy: Float, baseRadius: Float, ampMultiplier: Float): android.graphics.Path {
-        blobPath.reset()
-        val phase = (System.currentTimeMillis() % 10000L) / 10000f * (2 * Math.PI.toFloat())
-        val points = 8
-        val angleStep = Math.PI * 2 / points
-        
-        val vertexX = FloatArray(points)
-        val vertexY = FloatArray(points)
+    private val gradientColors = intArrayOf(Color.WHITE, 0, 0, Color.TRANSPARENT)
+    private val gradientStops = floatArrayOf(0f, 0.4f, 0.8f, 1f)
+    private var cachedGradient: RadialGradient? = null
+    private var cachedGradientRadius = -1f
+    private var cachedColorCenter = 0
+    private var cachedColorEdge = 0
+
+    private fun updateBlobPath(targetPath: android.graphics.Path, cx: Float, cy: Float, baseRadius: Float, ampMultiplier: Float, phase: Float): android.graphics.Path {
+        targetPath.reset()
         
         for (i in 0 until points) {
-            val angle = (i * angleStep).toFloat()
-            val wave1 = kotlin.math.sin(angle * 3 + phase).toFloat() * 0.08f
-            val wave2 = kotlin.math.cos(angle * 2 - phase * 1.5f).toFloat() * 0.12f
+            val angle = i * angleStep
+            val wave1 = kotlin.math.sin(angle * 3 + phase) * 0.08f
+            val wave2 = kotlin.math.cos(angle * 2 - phase * 1.5f) * 0.12f
             
             // amplitude is the raw voice amplitude property of this view
             val deformation = (wave1 + wave2) * (1f + amplitude * 2.5f * ampMultiplier)
             val r = baseRadius * (1f + deformation)
             
-            vertexX[i] = cx + r * kotlin.math.cos(angle).toFloat()
-            vertexY[i] = cy + r * kotlin.math.sin(angle).toFloat()
+            vertexX[i] = cx + r * kotlin.math.cos(angle)
+            vertexY[i] = cy + r * kotlin.math.sin(angle)
         }
         
         for (i in 0 until points) {
@@ -127,17 +134,17 @@ class RingIndicatorView(context: Context) : View(context) {
             val midY = (vertexY[i] + vertexY[next]) / 2f
             
             if (i == 0) {
-                blobPath.moveTo(midX, midY)
+                targetPath.moveTo(midX, midY)
             } else {
-                blobPath.quadTo(vertexX[i], vertexY[i], midX, midY)
+                targetPath.quadTo(vertexX[i], vertexY[i], midX, midY)
             }
         }
         val midFirstX = (vertexX[0] + vertexX[1]) / 2f
         val midFirstY = (vertexY[0] + vertexY[1]) / 2f
-        blobPath.quadTo(vertexX[0], vertexY[0], midFirstX, midFirstY)
-        blobPath.close()
+        targetPath.quadTo(vertexX[0], vertexY[0], midFirstX, midFirstY)
+        targetPath.close()
         
-        return blobPath
+        return targetPath
     }
 
     override fun onDraw(canvas: Canvas) {
@@ -149,35 +156,47 @@ class RingIndicatorView(context: Context) : View(context) {
         
         // Add amplitude effect (voice bouncing)
         val currentRadius = baseRadius * pulseScale * (1f + (amplitude * 1.5f))
+        val phase = (System.currentTimeMillis() % 10000L) / 10000f * (2 * Math.PI.toFloat())
         
         // 1. Draw outer faint glow
         paint.shader = null
         paint.color = colorEdge
         paint.alpha = (pulseAlpha * 40).toInt()
-        canvas.drawPath(getBlobPath(cx, cy, currentRadius * 1.8f, 0.2f), paint)
+        canvas.drawPath(updateBlobPath(blobPathOuter, cx, cy, currentRadius * 1.8f, 0.2f, phase), paint)
 
         // 2. Draw middle glow
         paint.color = colorCenter
         paint.alpha = (pulseAlpha * 80).toInt()
-        canvas.drawPath(getBlobPath(cx, cy, currentRadius * 1.4f, 0.5f), paint)
+        canvas.drawPath(updateBlobPath(blobPathMiddle, cx, cy, currentRadius * 1.4f, 0.5f, phase), paint)
         
-        // 3. Draw Inner core with gradient
-        paint.shader = RadialGradient(
-            cx, cy, currentRadius * 1.2f,
-            intArrayOf(Color.WHITE, colorCenter, colorEdge, Color.TRANSPARENT),
-            floatArrayOf(0f, 0.4f, 0.8f, 1f),
-            Shader.TileMode.CLAMP
-        )
+        // 3. Draw Inner core with gradient (reused cached gradient)
+        if (cachedGradient == null || cachedGradientRadius != currentRadius || cachedColorCenter != colorCenter || cachedColorEdge != colorEdge) {
+            gradientColors[1] = colorCenter
+            gradientColors[2] = colorEdge
+            cachedGradient = RadialGradient(
+                cx, cy, currentRadius * 1.2f,
+                gradientColors,
+                gradientStops,
+                Shader.TileMode.CLAMP
+            )
+            cachedGradientRadius = currentRadius
+            cachedColorCenter = colorCenter
+            cachedColorEdge = colorEdge
+        }
+        paint.shader = cachedGradient
         paint.alpha = (pulseAlpha * 255).toInt()
         
-        canvas.drawPath(getBlobPath(cx, cy, currentRadius, 1f), paint)
+        canvas.drawPath(updateBlobPath(blobPathCore, cx, cy, currentRadius, 1f, phase), paint)
         
-        // Keep animating continuously to make the blob morph over time
-        invalidate()
+        // Keep animating continuously only when active (active state, voice amplitude, or pulse animator)
+        if (state != RingState.IDLE || amplitude > 0.01f || pulseAnimator?.isRunning == true) {
+            postInvalidateOnAnimation()
+        }
     }
     
     override fun onDetachedFromWindow() {
         super.onDetachedFromWindow()
         pulseAnimator?.cancel()
+        cachedGradient = null
     }
 }

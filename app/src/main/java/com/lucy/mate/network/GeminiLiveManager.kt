@@ -1,4 +1,4 @@
-﻿package com.lucy.mate.network
+package com.lucy.mate.network
 
 import android.util.Base64
 import android.util.Log
@@ -492,15 +492,8 @@ When a tool response or system notification is received:
         val ws = webSocket ?: return
         try {
             val base64Audio = Base64.encodeToString(pcmChunk, Base64.NO_WRAP)
-            val message = JSONObject().apply {
-                put("realtimeInput", JSONObject().apply {
-                    put("audio", JSONObject().apply {
-                        put("data", base64Audio)
-                        put("mimeType", "audio/pcm;rate=16000")
-                    })
-                })
-            }
-            ws.send(message.toString())
+            val jsonPayload = """{"realtimeInput":{"audio":{"data":"$base64Audio","mimeType":"audio/pcm;rate=16000"}}}"""
+            ws.send(jsonPayload)
             audioChunksSentCount++
             if (audioChunksSentCount % 50 == 1) {
                 AppLogger.d(TAG, "Chunk sent: #$audioChunksSentCount (${pcmChunk.size} bytes)")

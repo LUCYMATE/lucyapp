@@ -1,4 +1,4 @@
-﻿package com.lucy.mate.audio
+package com.lucy.mate.audio
 
 import android.content.Context
 import android.media.AudioAttributes
@@ -158,8 +158,9 @@ class AudioPlayer(private val context: Context? = null) {
             queueEmptySince = 0L
 
             while (isPlaying) {
-                // Poll with minimal timeout: wakes up immediately when a new audio chunk is offered
-                val chunk = audioQueue.poll(if (_isSpeaking.value) 5 else 15, TimeUnit.MILLISECONDS)
+                // When speaking, poll frequently (5ms) to monitor hardware DAC drain.
+                // When idle, wait up to 200ms (or wake immediately on new chunk) to eliminate 50Hz idle CPU spin.
+                val chunk = audioQueue.poll(if (_isSpeaking.value) 5 else 200, TimeUnit.MILLISECONDS)
                 if (chunk != null && chunk.isNotEmpty()) {
                     if (!_isSpeaking.value) {
                         _isSpeaking.value = true
@@ -183,36 +184,35 @@ class AudioPlayer(private val context: Context? = null) {
                         }
                     }
                     yield()
-                } else {
+                } else if (_isSpeaking.value) {
                     // Queue is empty — but audio may still be playing in hardware buffer.
                     // Calculate how many frames the hardware has actually played using playbackHeadPosition.
-                    if (_isSpeaking.value) {
-                        if (queueEmptySince == 0L) {
-                            queueEmptySince = System.currentTimeMillis()
-                        }
-                        val track = audioTrack
-                        val hardwareDone = if (track != null) {
-                            val headPosition = track.playbackHeadPosition.toLong()
-                            // playbackHeadPosition wraps at Int.MAX_VALUE — normalise it
-                            val normHead = headPosition and 0xFFFFFFFFL
-                            normHead >= (totalFramesWritten and 0xFFFFFFFFL)
-                        } else {
-                            true
-                        }
-                        val timeEmpty = System.currentTimeMillis() - queueEmptySince
-                        // Either hardware DAC completed the playback (80ms debounce) OR
-                        // safety timeout (350ms) elapsed so mic is never blocked by stalled HAL positions
-                        if ((hardwareDone && timeEmpty >= 80) || timeEmpty >= 350) {
-                            // Audio has fully drained from the hardware DAC
-                            _isSpeaking.value = false
-                            _speakerAmplitude.value = 0f
-                            abandonFocus()
-                            totalFramesWritten = 0L
-                            queueEmptySince = 0L
-                            AppLogger.d(TAG, "AudioTrack hardware drain complete — mic unmuting (timeEmpty=${timeEmpty}ms)")
-                        }
+                    if (queueEmptySince == 0L) {
+                        queueEmptySince = System.currentTimeMillis()
                     }
-                    delay(5)
+                    val track = audioTrack
+                    val hardwareDone = if (track != null) {
+                        val headPosition = track.playbackHeadPosition.toLong()
+                        // playbackHeadPosition wraps at Int.MAX_VALUE — normalise it
+                        val normHead = headPosition and 0xFFFFFFFFL
+                        normHead >= (totalFramesWritten and 0xFFFFFFFFL)
+                    } else {
+                        true
+                    }
+                    val timeEmpty = System.currentTimeMillis() - queueEmptySince
+                    // Either hardware DAC completed the playback (80ms debounce) OR
+                    // safety timeout (350ms) elapsed so mic is never blocked by stalled HAL positions
+                    if ((hardwareDone && timeEmpty >= 80) || timeEmpty >= 350) {
+                        // Audio has fully drained from the hardware DAC
+                        _isSpeaking.value = false
+                        _speakerAmplitude.value = 0f
+                        abandonFocus()
+                        totalFramesWritten = 0L
+                        queueEmptySince = 0L
+                        AppLogger.d(TAG, "AudioTrack hardware drain complete — mic unmuting (timeEmpty=${timeEmpty}ms)")
+                    } else {
+                        delay(5)
+                    }
                 }
             }
         }
@@ -268,15 +268,18 @@ class AudioPlayer(private val context: Context? = null) {
             i += 2
         }
         val norm = (maxSample / 32768f).coerceIn(0f, 1f)
-        _speakerAmplitude.value = norm
+        if (abs(norm - _speakerAmplitude.value) > 0.015f || (norm == 0f && _speakerAmplitude.value != 0f)) {
+            _speakerAmplitude.value = norm
+        }
     }
 
     fun stop() {
         isPlaying = false
+        audioQueue.clear()
+        audioQueue.offer(ByteArray(0))
         playbackJob?.cancel()
         playbackJob = null
         playerScope.coroutineContext.cancelChildren()
-        audioQueue.clear()
         try {
             audioTrack?.stop()
             audioTrack?.release()

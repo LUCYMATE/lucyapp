@@ -1,4 +1,4 @@
-﻿package com.lucy.mate.services
+package com.lucy.mate.services
 
 import android.os.Build
 import android.service.quicksettings.Tile
@@ -21,7 +21,7 @@ class BankingModeTileService : TileService() {
 
     override fun onClick() {
         super.onClick()
-        val appSettings = AppSettings(this)
+        val appSettings = AppSettings.getInstance(this)
         val newPausedState = !appSettings.isBankingModePaused
         appSettings.isBankingModePaused = newPausedState
 
@@ -34,7 +34,7 @@ class BankingModeTileService : TileService() {
 
     private fun updateTileState() {
         val tile = qsTile ?: return
-        val appSettings = AppSettings(this)
+        val appSettings = AppSettings.getInstance(this)
         val isPaused = appSettings.isBankingModePaused || (OverlayService.getInstance()?.isHiddenForBanking() == true)
 
         if (isPaused) {

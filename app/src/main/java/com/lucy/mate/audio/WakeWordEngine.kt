@@ -1,4 +1,4 @@
-﻿package com.lucy.mate.audio
+package com.lucy.mate.audio
 
 import android.content.Context
 import android.content.res.AssetFileDescriptor
@@ -118,9 +118,16 @@ class WakeWordEngine(private val context: Context) {
                 // Impulses/taps last only 1-2 chunks and are safely ignored.
                 if (consecutiveSpeechFrames in 6..14) {
                     // Check variance to ensure it's human speech modulation rather than a steady fan/hum
-                    val avg = frameEnergies.average()
-                    val variance = frameEnergies.map { (it - avg) * (it - avg) }.average()
-                    val stdDev = sqrt(variance)
+                    val count = frameEnergies.size
+                    var energySum = 0.0
+                    for (e in frameEnergies) energySum += e
+                    val avg = energySum / count
+                    var varianceSum = 0.0
+                    for (e in frameEnergies) {
+                        val diff = e - avg
+                        varianceSum += diff * diff
+                    }
+                    val stdDev = sqrt(varianceSum / count)
 
                     if (stdDev > 400.0) {
                         lastTriggerTimestamp = now

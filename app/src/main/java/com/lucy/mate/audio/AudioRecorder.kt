@@ -1,4 +1,4 @@
-﻿package com.lucy.mate.audio
+package com.lucy.mate.audio
 
 import android.annotation.SuppressLint
 import android.media.AudioFormat
@@ -168,9 +168,34 @@ class AudioRecorder(
                     val bytesRead = audioRecord?.read(buffer, 0, buffer.size) ?: -1
                     if (bytesRead > 0) {
                         errorCount = 0
-                        val rawChunk = buffer.copyOf(bytesRead)
-                        val chunk = if (micGain != 1.0f) applySoftGain(rawChunk, micGain) else rawChunk
-                        val amp = calculateAmplitude(chunk)
+                        val chunk = ByteArray(bytesRead)
+                        var maxSample = 0
+                        var i = 0
+                        val gain = micGain
+                        if (gain == 1.0f) {
+                            System.arraycopy(buffer, 0, chunk, 0, bytesRead)
+                            while (i < bytesRead - 1) {
+                                val sample = (buffer[i].toInt() and 0xFF) or (buffer[i + 1].toInt() shl 8)
+                                val absSample = abs(sample.toShort().toInt())
+                                if (absSample > maxSample) maxSample = absSample
+                                i += 2
+                            }
+                        } else {
+                            while (i < bytesRead - 1) {
+                                val sample = (buffer[i].toInt() and 0xFF) or (buffer[i + 1].toInt() shl 8)
+                                val shortSample = sample.toShort().toInt()
+                                val scaled = (shortSample * gain).toInt().coerceIn(-32768, 32767)
+                                chunk[i] = scaled.toByte()
+                                chunk[i + 1] = (scaled shr 8).toByte()
+                                val absSample = abs(scaled)
+                                if (absSample > maxSample) maxSample = absSample
+                                i += 2
+                            }
+                        }
+                        val amp = if (isMuted) 0f else (maxSample / 32768f).coerceIn(0f, 1f)
+                        if (abs(amp - _micAmplitude.value) > 0.015f || (amp == 0f && _micAmplitude.value != 0f)) {
+                            _micAmplitude.value = amp
+                        }
 
                         // Dead-mic / silenced stream detection:
                         // Only trigger recovery if the mic has been completely flatline (amp=0.0) for an extended period

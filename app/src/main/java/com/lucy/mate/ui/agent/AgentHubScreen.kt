@@ -1,4 +1,4 @@
-﻿package com.lucy.mate.ui.agent
+package com.lucy.mate.ui.agent
 
 import android.content.Intent
 import android.provider.Settings
@@ -121,22 +121,24 @@ fun AgentHubScreen(
     var expandedSkillId by remember { mutableStateOf<String?>(null) }
     var showAddSkillDialog by remember { mutableStateOf(false) }
 
-    val isA11yActive = remember(skills) { SettingsPermChecks.checkAccessibility(context) }
-    val activeCount = skills.count { it.isEnabled }
+    val isA11yActive = remember { SettingsPermChecks.checkAccessibility(context) }
+    val activeCount = remember(skills) { skills.count { it.isEnabled } }
     val totalCount = skills.size
 
-    // Filter skills according to category and search query
-    val filteredSkills = skills.filter { skill ->
-        val matchesCategory = selectedCategory == null || skill.category == selectedCategory
-        val matchesSearch = if (searchQuery.isBlank()) true else {
-            val q = searchQuery.trim().lowercase()
-            skill.name.lowercase().contains(q) ||
-            skill.description.lowercase().contains(q) ||
-            skill.category.name.lowercase().contains(q) ||
-            skill.tools.any { it.lowercase().contains(q) } ||
-            skill.triggerKeywords.any { it.lowercase().contains(q) }
+    // Filter skills according to category and search query (memoized)
+    val filteredSkills = remember(skills, selectedCategory, searchQuery) {
+        val q = searchQuery.trim().lowercase()
+        skills.filter { skill ->
+            val matchesCategory = selectedCategory == null || skill.category == selectedCategory
+            val matchesSearch = if (q.isBlank()) true else {
+                skill.name.lowercase().contains(q) ||
+                skill.description.lowercase().contains(q) ||
+                skill.category.name.lowercase().contains(q) ||
+                skill.tools.any { it.lowercase().contains(q) } ||
+                skill.triggerKeywords.any { it.lowercase().contains(q) }
+            }
+            matchesCategory && matchesSearch
         }
-        matchesCategory && matchesSearch
     }
 
     Surface(

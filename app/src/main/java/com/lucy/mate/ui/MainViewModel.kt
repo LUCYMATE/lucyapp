@@ -1,4 +1,4 @@
-﻿package com.lucy.mate.ui
+package com.lucy.mate.ui
 
 import android.app.Application
 import android.content.ComponentName
@@ -29,9 +29,10 @@ data class TranscriptEntry(
 
 class MainViewModel(application: Application) : AndroidViewModel(application) {
 
-    val appSettings = com.lucy.mate.settings.AppSettings(application)
+    val appSettings = com.lucy.mate.settings.AppSettings.getInstance(application)
     val skillRegistry = com.lucy.mate.agent.skills.SkillRegistry.getInstance(application)
     private var voiceService: BackgroundVoiceService? = null
+    private var serviceObserveJob: kotlinx.coroutines.Job? = null
 
     private val _connectionState = MutableStateFlow<ConnectionState>(ConnectionState.Disconnected)
     val connectionState: StateFlow<ConnectionState> = _connectionState.asStateFlow()
@@ -87,6 +88,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             }
         }
         override fun onServiceDisconnected(arg0: ComponentName) {
+            serviceObserveJob?.cancel()
+            serviceObserveJob = null
             voiceService = null
         }
     }
@@ -110,21 +113,23 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     private fun observeService() {
-        voiceService?.let { service ->
-            viewModelScope.launch { service.connectionState.collect { _connectionState.value = it } }
-            viewModelScope.launch { service.errorMessage.collect { _errorMessage.value = it } }
-            viewModelScope.launch { service.micAmplitude.collect { _micAmplitude.value = it } }
-            viewModelScope.launch { service.speakerAmplitude.collect { _speakerAmplitude.value = it } }
-            viewModelScope.launch { service.isSpeaking.collect { _isSpeaking.value = it } }
-            viewModelScope.launch { service.isMuted.collect { _isMuted.value = it } }
-            viewModelScope.launch { service.hasMicPermission.collect { _hasMicPermission.value = it } }
-            viewModelScope.launch { service.transcripts.collect { _transcripts.value = it } }
-            viewModelScope.launch { service.isPaused.collect {
+        serviceObserveJob?.cancel()
+        val service = voiceService ?: return
+        serviceObserveJob = viewModelScope.launch {
+            launch { service.connectionState.collect { _connectionState.value = it } }
+            launch { service.errorMessage.collect { _errorMessage.value = it } }
+            launch { service.micAmplitude.collect { _micAmplitude.value = it } }
+            launch { service.speakerAmplitude.collect { _speakerAmplitude.value = it } }
+            launch { service.isSpeaking.collect { _isSpeaking.value = it } }
+            launch { service.isMuted.collect { _isMuted.value = it } }
+            launch { service.hasMicPermission.collect { _hasMicPermission.value = it } }
+            launch { service.transcripts.collect { _transcripts.value = it } }
+            launch { service.isPaused.collect {
                 _isPaused.value = it
                 _isLitePaused.value = it
             }}
-            viewModelScope.launch { service.isHardPaused.collect { _isHardPaused.value = it } }
-            viewModelScope.launch { service.isAppPaused.collect { _isAppPaused.value = it } }
+            launch { service.isHardPaused.collect { _isHardPaused.value = it } }
+            launch { service.isAppPaused.collect { _isAppPaused.value = it } }
         }
     }
 
@@ -223,6 +228,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     override fun onCleared() {
         super.onCleared()
+        serviceObserveJob?.cancel()
+        serviceObserveJob = null
         try {
             getApplication<Application>().unbindService(connection)
         } catch (e: Exception) {

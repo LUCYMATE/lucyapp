@@ -1,4 +1,4 @@
-﻿package com.lucy.mate.settings
+package com.lucy.mate.settings
 
 import android.content.Context
 import com.lucy.mate.BuildConfig
@@ -10,7 +10,7 @@ import com.lucy.mate.BuildConfig
  * Changes take effect the next time GeminiLiveManager.connect() is called
  * (triggered by the "Save & Reconnect" button in the settings UI).
  */
-class AppSettings(context: Context) {
+class AppSettings private constructor(context: Context) {
 
     private val prefs = context.applicationContext
         .getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
@@ -177,12 +177,22 @@ class AppSettings(context: Context) {
         if (DEFAULT_BANKING_PACKAGES.contains(pkgLower)) return true
 
         // Keyword heuristics for unlisted banking/financial apps
-        val keywords = listOf("bank", "paytm", "phonepe", "gpay", "wallet", "upi", "paisa", "financial", "mobilebanking")
-        return keywords.any { pkgLower.contains(it) } && !pkgLower.contains("wallpaper") && !pkgLower.contains("systemui")
+        return BANKING_KEYWORDS.any { pkgLower.contains(it) } && !pkgLower.contains("wallpaper") && !pkgLower.contains("systemui")
     }
 
     companion object {
         private const val PREFS_NAME = "soltini_ai_settings"
+
+        @Volatile
+        private var instance: AppSettings? = null
+
+        fun getInstance(context: Context): AppSettings {
+            return instance ?: synchronized(this) {
+                instance ?: AppSettings(context.applicationContext).also { instance = it }
+            }
+        }
+
+        private val BANKING_KEYWORDS = listOf("bank", "paytm", "phonepe", "gpay", "wallet", "upi", "paisa", "financial", "mobilebanking")
         private const val KEY_API_KEY = "gemini_api_key"
         private const val KEY_CHARACTER_PERSONA = "character_persona"
         private const val KEY_VISUALIZER_MODE = "visualizer_mode"

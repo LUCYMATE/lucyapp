@@ -1,4 +1,4 @@
-﻿package com.lucy.mate
+package com.lucy.mate
 
 import android.content.BroadcastReceiver
 import android.content.Context
@@ -44,7 +44,7 @@ class BootReceiver : BroadcastReceiver() {
 
         if (!isBootAction) return
 
-        val appSettings = com.lucy.mate.settings.AppSettings(context)
+        val appSettings = com.lucy.mate.settings.AppSettings.getInstance(context)
         if (appSettings.isAppPaused) {
             Log.i(TAG, "Event ($action) received but Soltini is completely PAUSED by user. Skipping all background starts.")
             return

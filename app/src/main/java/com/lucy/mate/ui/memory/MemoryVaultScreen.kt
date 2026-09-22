@@ -1,4 +1,4 @@
-﻿package com.lucy.mate.ui.memory
+package com.lucy.mate.ui.memory
 
 import android.widget.Toast
 import androidx.compose.animation.AnimatedVisibility
@@ -76,6 +76,10 @@ import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 
+private val REGEX_IDENTITY = Regex("name|called|born|age|birthday|i am|myself", RegexOption.IGNORE_CASE)
+private val REGEX_PREFERENCES = Regex("like|love|prefer|favorite|hobby|enjoy|fan", RegexOption.IGNORE_CASE)
+private val REGEX_PLACES = Regex("live|from|city|work|home|office|country|location", RegexOption.IGNORE_CASE)
+
 @Composable
 fun MemoryVaultScreen(
     viewModel: MainViewModel,
@@ -104,9 +108,9 @@ fun MemoryVaultScreen(
             val matchesQuery = if (searchQuery.isBlank()) true else mem.content.contains(searchQuery, ignoreCase = true)
             val matchesCategory = when (selectedCategory) {
                 "AI_AUTO" -> mem.importance >= 0.72f
-                "IDENTITY" -> mem.content.contains(Regex("name|called|born|age|birthday|i am|myself", RegexOption.IGNORE_CASE))
-                "PREFERENCES" -> mem.content.contains(Regex("like|love|prefer|favorite|hobby|enjoy|fan", RegexOption.IGNORE_CASE))
-                "PLACES" -> mem.content.contains(Regex("live|from|city|work|home|office|country|location", RegexOption.IGNORE_CASE))
+                "IDENTITY" -> mem.content.contains(REGEX_IDENTITY)
+                "PREFERENCES" -> mem.content.contains(REGEX_PREFERENCES)
+                "PLACES" -> mem.content.contains(REGEX_PLACES)
                 else -> true
             }
             matchesQuery && matchesCategory

@@ -1,4 +1,4 @@
-﻿package com.lucy.mate.services
+package com.lucy.mate.services
 
 import android.app.AlarmManager
 import android.app.NotificationChannel
@@ -207,7 +207,7 @@ class BackgroundVoiceService : Service(), GeminiLiveListener, ToolCallListener {
         Log.i(TAG, "BackgroundVoiceService created")
 
         // ── User-configurable settings + memory FIRST ───────────────────────────
-        appSettings = AppSettings(this)
+        appSettings = AppSettings.getInstance(this)
         _isAppPaused.value = appSettings.isAppPaused
         val initialMic = androidx.core.content.ContextCompat.checkSelfPermission(
             this,

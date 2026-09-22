@@ -1,4 +1,4 @@
-﻿package com.lucy.mate.agent
+package com.lucy.mate.agent
 
 import android.accessibilityservice.AccessibilityService
 import android.accessibilityservice.GestureDescription
@@ -191,7 +191,7 @@ class SoltiniAccessibilityService : AccessibilityService() {
     @Volatile
     var isAutomatingForceStop: Boolean = false
 
-    private val appSettings by lazy { com.lucy.mate.settings.AppSettings(this) }
+    private val appSettings by lazy { com.lucy.mate.settings.AppSettings.getInstance(this) }
 
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {
         // While app is paused: completely dormant with zero device relation,

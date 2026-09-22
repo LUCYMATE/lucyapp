@@ -1,4 +1,4 @@
-﻿package com.lucy.mate.ui.components
+package com.lucy.mate.ui.components
 
 import android.annotation.SuppressLint
 import android.content.Context
@@ -57,32 +57,46 @@ fun Live2DView(
             characterName == AppSettings.CHARACTER_SOLTINI
 
     if (isVrm) {
-        val assetLoader = remember {
-            WebViewAssetLoader.Builder()
-                .addPathHandler("/assets/", WebViewAssetLoader.AssetsPathHandler(context))
-                .build()
+        var webViewRef by remember { mutableStateOf<WebView?>(null) }
+        val throttleState = remember {
+            object {
+                var lastTime = 0L
+                var lastSentAmp = -1f
+                var lastSpeaking = false
+            }
         }
 
-        var webViewRef by remember { mutableStateOf<WebView?>(null) }
-        var lastAmpUpdateTime by remember { mutableStateOf(0L) }
-        var lastSentAmp by remember { mutableStateOf(-1f) }
-
-        LaunchedEffect(isSpeaking, amplitude, webViewRef) {
-            val wv = webViewRef ?: return@LaunchedEffect
+        androidx.compose.runtime.SideEffect {
+            val wv = webViewRef ?: return@SideEffect
             val clampedAmp = if (isSpeaking) (amplitude * 2.5f).coerceIn(0f, 1f) else 0f
-            val now = System.currentTimeMillis()
-            if (now - lastAmpUpdateTime >= 33L || kotlin.math.abs(clampedAmp - lastSentAmp) > 0.05f || !isSpeaking) {
-                lastAmpUpdateTime = now
-                lastSentAmp = clampedAmp
+            val now = android.os.SystemClock.uptimeMillis()
+            if (now - throttleState.lastTime >= 33L || kotlin.math.abs(clampedAmp - throttleState.lastSentAmp) > 0.05f || isSpeaking != throttleState.lastSpeaking) {
+                throttleState.lastTime = now
+                throttleState.lastSentAmp = clampedAmp
+                throttleState.lastSpeaking = isSpeaking
                 val js = "if (window.Aria) { window.Aria.setTalking($isSpeaking); window.Aria.setMouthAmplitude($clampedAmp); }"
                 wv.evaluateJavascript(js, null)
+            }
+        }
+
+        val nativeBridge = remember {
+            object {
+                @JavascriptInterface
+                fun onModelReady() {
+                    Log.d("Live2DView-VRM", "3D VRM model ready")
+                }
+
+                @JavascriptInterface
+                fun onAvatarTapped() {
+                    Log.d("Live2DView-VRM", "3D VRM avatar tapped")
+                }
             }
         }
 
         Box(modifier = modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
             AndroidView(
                 factory = { ctx ->
-                    createVrmWebView(ctx, assetLoader).also {
+                    com.lucy.mate.engine.VrmWebViewHelper.createConfiguredWebView(ctx, nativeBridge).also {
                         webViewRef = it
                     }
                 },
@@ -108,7 +122,8 @@ fun Live2DView(
             glViewRef?.setActiveFrameRate(isSpeaking)
         }
 
-        LaunchedEffect(amplitude, isSpeaking) {
+        // Direct lip-sync update without cancelling and launching coroutines 60 times/sec
+        androidx.compose.runtime.SideEffect {
             val lipAmp = if (isSpeaking) (amplitude * 2.5f).coerceIn(0f, 1f) else 0f
             engine.setLipSync(lipAmp)
         }
@@ -160,127 +175,5 @@ fun Live2DView(
                 modifier = Modifier.fillMaxSize()
             )
         }
-    }
-}
-
-@SuppressLint("SetJavaScriptEnabled")
-private fun createVrmWebView(
-    context: Context,
-    assetLoader: WebViewAssetLoader
-): WebView {
-    if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.KITKAT) {
-        WebView.setWebContentsDebuggingEnabled(true)
-    }
-    return WebView(context).apply {
-        setBackgroundColor(Color.TRANSPARENT)
-        setLayerType(View.LAYER_TYPE_NONE, null)
-        layoutParams = android.view.ViewGroup.LayoutParams(
-            android.view.ViewGroup.LayoutParams.MATCH_PARENT,
-            android.view.ViewGroup.LayoutParams.MATCH_PARENT
-        )
-        addOnLayoutChangeListener { _, left, top, right, bottom, _, _, _, _ ->
-            Log.i("Live2DView-VRM", "WebView layout changed: width=${right - left}, height=${bottom - top}")
-        }
-        settings.apply {
-            javaScriptEnabled = true
-            domStorageEnabled = true
-            databaseEnabled = true
-            allowFileAccess = true
-            allowContentAccess = true
-            @Suppress("DEPRECATION")
-            allowFileAccessFromFileURLs = true
-            @Suppress("DEPRECATION")
-            allowUniversalAccessFromFileURLs = true
-            cacheMode = WebSettings.LOAD_NO_CACHE
-            mediaPlaybackRequiresUserGesture = false
-        }
-
-        webChromeClient = object : WebChromeClient() {
-            override fun onConsoleMessage(consoleMessage: ConsoleMessage?): Boolean {
-                consoleMessage?.let {
-                    Log.d("Live2DView-VRM", "[${it.messageLevel()}] ${it.message()} (${it.sourceId()}:${it.lineNumber()})")
-                }
-                return true
-            }
-        }
-
-        addJavascriptInterface(object {
-            @JavascriptInterface
-            fun onModelReady() {
-                Log.d("Live2DView-VRM", "3D VRM model ready")
-            }
-
-            @JavascriptInterface
-            fun onAvatarTapped() {
-                Log.d("Live2DView-VRM", "3D VRM avatar tapped")
-            }
-        }, "AriaNative")
-
-        webViewClient = object : WebViewClient() {
-            override fun shouldInterceptRequest(
-                view: WebView?,
-                request: WebResourceRequest?
-            ): WebResourceResponse? {
-                val url = request?.url ?: return null
-
-                // 1. Direct handling of .vrm with full binary response and CORS headers
-                if (url.path?.endsWith(".vrm", ignoreCase = true) == true) {
-                    try {
-                        val assetPath = url.path!!.trimStart('/').removePrefix("assets/")
-                        val isStream = context.assets.open(assetPath)
-                        val length = try {
-                            context.assets.openFd(assetPath).length.toString()
-                        } catch (e: Exception) {
-                            null
-                        }
-                        val headers = mutableMapOf(
-                            "Access-Control-Allow-Origin" to "*",
-                            "Access-Control-Allow-Methods" to "GET, OPTIONS, HEAD",
-                            "Access-Control-Allow-Headers" to "*",
-                            "Content-Type" to "model/gltf-binary"
-                        )
-                        length?.let { headers["Content-Length"] = it }
-                        return WebResourceResponse("model/gltf-binary", null, 200, "OK", headers, isStream)
-                    } catch (e: Exception) {
-                        Log.e("Live2DView-VRM", "Failed direct soltini.vrm load", e)
-                    }
-                }
-
-                // 2. Delegate all other assets (html, js) through WebViewAssetLoader with CORS headers
-                val response = assetLoader.shouldInterceptRequest(url)
-                if (response != null) {
-                    val headers = HashMap(response.responseHeaders ?: emptyMap())
-                    headers["Access-Control-Allow-Origin"] = "*"
-                    headers["Access-Control-Allow-Methods"] = "GET, OPTIONS, HEAD"
-                    headers["Access-Control-Allow-Headers"] = "*"
-                    response.responseHeaders = headers
-                    if (url.path?.endsWith(".js", ignoreCase = true) == true) {
-                        response.mimeType = "application/javascript"
-                    }
-                    return response
-                }
-                return null
-            }
-
-            override fun onPageFinished(view: WebView?, url: String?) {
-                super.onPageFinished(view, url)
-                Log.d("Live2DView-VRM", "Page finished loading: $url")
-                view?.evaluateJavascript(
-                    "window.dispatchEvent(new Event('resize')); if (window.Aria) { window.Aria.setListening(true); }",
-                    null
-                )
-            }
-
-            override fun onReceivedError(
-                view: WebView?,
-                request: WebResourceRequest?,
-                error: android.webkit.WebResourceError?
-            ) {
-                super.onReceivedError(view, request, error)
-                Log.e("Live2DView-VRM", "WebView error: ${error?.description} on ${request?.url}")
-            }
-        }
-
-        loadUrl("https://appassets.androidplatform.net/assets/avatar/index.html")
     }
 }

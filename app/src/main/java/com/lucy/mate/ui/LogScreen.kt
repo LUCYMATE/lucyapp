@@ -1,4 +1,4 @@
-﻿package com.lucy.mate.ui
+package com.lucy.mate.ui
 
 import android.widget.Toast
 import androidx.compose.foundation.background
@@ -63,7 +63,7 @@ fun LogScreen(
 
     LaunchedEffect(logs.size) {
         if (logs.isNotEmpty()) {
-            listState.animateScrollToItem(logs.size - 1)
+            listState.scrollToItem(logs.size - 1)
         }
     }
 

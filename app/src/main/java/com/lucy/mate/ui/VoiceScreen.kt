@@ -1,4 +1,4 @@
-﻿package com.lucy.mate.ui
+package com.lucy.mate.ui
 
 import android.widget.Toast
 import androidx.compose.animation.AnimatedVisibility
@@ -182,7 +182,7 @@ fun VoiceScreen(
     modifier: Modifier = Modifier
 ) {
     val context = LocalContext.current
-    val appSettings = remember { AppSettings(context) }
+    val appSettings = remember { AppSettings.getInstance(context) }
     val initialMode = remember {
         if (appSettings.visualizerMode.equals("AVATAR", ignoreCase = true)) VisualizerMode.AVATAR else VisualizerMode.ORB
     }
@@ -193,10 +193,7 @@ fun VoiceScreen(
     val connectionState by viewModel.connectionState.collectAsStateWithLifecycle()
     val errorMessage by viewModel.errorMessage.collectAsStateWithLifecycle()
     val isMuted by viewModel.isMuted.collectAsStateWithLifecycle()
-    val micAmplitude by viewModel.micAmplitude.collectAsStateWithLifecycle()
-    val speakerAmplitude by viewModel.speakerAmplitude.collectAsStateWithLifecycle()
     val isSpeaking by viewModel.isSpeaking.collectAsStateWithLifecycle()
-    val transcripts by viewModel.transcripts.collectAsStateWithLifecycle()
     val hasMicPermission by viewModel.hasMicPermission.collectAsStateWithLifecycle()
     val isAppPaused by viewModel.isAppPaused.collectAsStateWithLifecycle()
     val isLitePaused by viewModel.isLitePaused.collectAsStateWithLifecycle()
@@ -240,7 +237,6 @@ fun VoiceScreen(
     }
 
     val isLive = connectionState == ConnectionState.Live && !isPaused
-    val latestTranscript = transcripts.lastOrNull()?.text ?: "Listening... Tap the mic or speak freely"
 
     Surface(
         modifier = modifier
@@ -307,45 +303,18 @@ fun VoiceScreen(
 
                 Spacer(Modifier.height(6.dp))
 
-                // Central Visualizer Stage (fills the screen elegantly)
-                Box(
+                // Central Visualizer Stage (isolated scope: amplitude updates do not recompose VoiceScreen)
+                VisualizerStage(
+                    viewModel = viewModel,
+                    visualizerMode = visualizerMode,
+                    selectedCharacter = selectedCharacter,
+                    isLive = isLive,
+                    isSpeaking = isSpeaking,
+                    isMuted = isMuted,
                     modifier = Modifier
                         .weight(1f)
-                        .fillMaxWidth(),
-                    contentAlignment = Alignment.Center
-                ) {
-                    Crossfade(
-                        targetState = visualizerMode,
-                        label = "visualizer_stage_crossfade",
-                        modifier = Modifier.fillMaxSize()
-                    ) { mode ->
-                        when (mode) {
-                            VisualizerMode.ORB -> {
-                                Box(
-                                    modifier = Modifier.fillMaxSize(),
-                                    contentAlignment = Alignment.Center
-                                ) {
-                                    AudioVisualizerOrb(
-                                        micAmplitude = micAmplitude,
-                                        speakerAmplitude = speakerAmplitude,
-                                        isLive = isLive,
-                                        isSpeaking = isSpeaking,
-                                        isMuted = isMuted,
-                                        modifier = Modifier.size(240.dp)
-                                    )
-                                }
-                            }
-                            VisualizerMode.AVATAR -> {
-                                Live2DView(
-                                    characterName = selectedCharacter,
-                                    amplitude = if (isSpeaking) speakerAmplitude else 0f,
-                                    isSpeaking = isSpeaking,
-                                    modifier = Modifier.fillMaxSize()
-                                )
-                            }
-                        }
-                    }
-                }
+                        .fillMaxWidth()
+                )
 
                 Spacer(Modifier.height(12.dp))
 
@@ -377,7 +346,7 @@ fun VoiceScreen(
                 modifier = Modifier.align(Alignment.BottomCenter)
             ) {
                 ConversationHistorySheet(
-                    transcripts = transcripts,
+                    viewModel = viewModel,
                     onSendMessage = { text -> viewModel.sendTextMessage(text) },
                     onClose = { showChatSheet = false },
                     onClear = { viewModel.clearTranscript() }
@@ -438,6 +407,57 @@ fun VoiceScreen(
 }
 
 @Composable
+private fun VisualizerStage(
+    viewModel: MainViewModel,
+    visualizerMode: VisualizerMode,
+    selectedCharacter: String,
+    isLive: Boolean,
+    isSpeaking: Boolean,
+    isMuted: Boolean,
+    modifier: Modifier = Modifier
+) {
+    val micAmplitude by viewModel.micAmplitude.collectAsStateWithLifecycle()
+    val speakerAmplitude by viewModel.speakerAmplitude.collectAsStateWithLifecycle()
+
+    Box(
+        modifier = modifier,
+        contentAlignment = Alignment.Center
+    ) {
+        Crossfade(
+            targetState = visualizerMode,
+            label = "visualizer_stage_crossfade",
+            modifier = Modifier.fillMaxSize()
+        ) { mode ->
+            when (mode) {
+                VisualizerMode.ORB -> {
+                    Box(
+                        modifier = Modifier.fillMaxSize(),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        AudioVisualizerOrb(
+                            micAmplitude = micAmplitude,
+                            speakerAmplitude = speakerAmplitude,
+                            isLive = isLive,
+                            isSpeaking = isSpeaking,
+                            isMuted = isMuted,
+                            modifier = Modifier.size(240.dp)
+                        )
+                    }
+                }
+                VisualizerMode.AVATAR -> {
+                    Live2DView(
+                        characterName = selectedCharacter,
+                        amplitude = if (isSpeaking) speakerAmplitude else 0f,
+                        isSpeaking = isSpeaking,
+                        modifier = Modifier.fillMaxSize()
+                    )
+                }
+            }
+        }
+    }
+}
+
+@Composable
 private fun VisualizerUnifiedBar(
     currentChoice: VisualizerChoice,
     onSelectChoice: (VisualizerChoice) -> Unit,
@@ -454,7 +474,7 @@ private fun VisualizerUnifiedBar(
             verticalAlignment = Alignment.CenterVertically,
             contentPadding = PaddingValues(horizontal = 4.dp)
         ) {
-            items(VisualizerChoice.values()) { choice ->
+            items(VisualizerChoice.entries) { choice ->
                 val isSelected = currentChoice == choice
                 val bg = if (isSelected) RosePink else PearlWhiteSurface
                 val textColor = if (isSelected) Color.White else TextPrimary
@@ -491,59 +511,7 @@ private fun VisualizerUnifiedBar(
     }
 }
 
-@Composable
-private fun SubtitlesCard(
-    latestTranscript: String,
-    isSpeaking: Boolean,
-    modifier: Modifier = Modifier
-) {
-    Card(
-        modifier = modifier.fillMaxWidth(0.92f),
-        colors = CardDefaults.cardColors(containerColor = PearlWhiteSurface),
-        shape = RoundedCornerShape(20.dp),
-        border = BorderStroke(1.dp, PinkyBorder),
-        elevation = CardDefaults.cardElevation(defaultElevation = 2.dp)
-    ) {
-        Column(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(horizontal = 16.dp, vertical = 12.dp),
-            horizontalAlignment = Alignment.CenterHorizontally
-        ) {
-            Row(
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.Center,
-                modifier = Modifier.padding(bottom = 4.dp)
-            ) {
-                Box(
-                    modifier = Modifier
-                        .size(6.dp)
-                        .clip(CircleShape)
-                        .background(if (isSpeaking) RosePink else SoftViolet)
-                )
-                Spacer(Modifier.width(6.dp))
-                Text(
-                    text = if (isSpeaking) "LUCY Speaking" else "Live Subtitles",
-                    color = if (isSpeaking) RosePink else SoftViolet,
-                    fontSize = 10.sp,
-                    fontWeight = FontWeight.Bold,
-                    letterSpacing = 0.5.sp
-                )
-            }
 
-            Text(
-                text = latestTranscript,
-                color = TextPrimary,
-                fontSize = 13.sp,
-                lineHeight = 18.sp,
-                fontWeight = FontWeight.Medium,
-                textAlign = TextAlign.Center,
-                maxLines = 3,
-                overflow = TextOverflow.Ellipsis
-            )
-        }
-    }
-}
 
 @Composable
 private fun VoiceTopBar(
@@ -775,28 +743,29 @@ private fun VoiceFloatingDock(
     }
 }
 
+private val QuickActionMacros = listOf(
+    "📸 Read Screen" to "Take a screenshot and describe everything on my screen",
+    "💬 WhatsApp"    to "Open WhatsApp and help me compose a message",
+    "▶️ YouTube"     to "Open YouTube and play relaxing music",
+    "🔒 Lock Device" to "Lock the device screen right now"
+)
+private val QuickActionChipShape = RoundedCornerShape(16.dp)
+
 @Composable
 private fun VoiceQuickActionsRow(
     onTrigger: (macroName: String, prompt: String) -> Unit,
     modifier: Modifier = Modifier
 ) {
-    val macros = listOf(
-        "📸 Read Screen" to "Take a screenshot and describe everything on my screen",
-        "💬 WhatsApp"    to "Open WhatsApp and help me compose a message",
-        "▶️ YouTube"     to "Open YouTube and play relaxing music",
-        "🔒 Lock Device" to "Lock the device screen right now"
-    )
-
     LazyRow(
         modifier = modifier.fillMaxWidth(),
         horizontalArrangement = Arrangement.spacedBy(8.dp)
     ) {
-        items(macros) { (title, prompt) ->
+        items(QuickActionMacros) { (title, prompt) ->
             Box(
                 modifier = Modifier
-                    .clip(RoundedCornerShape(16.dp))
+                    .clip(QuickActionChipShape)
                     .background(PearlWhiteSurface)
-                    .border(1.dp, PinkyBorder, RoundedCornerShape(16.dp))
+                    .border(1.dp, PinkyBorder, QuickActionChipShape)
                     .clickable { onTrigger(title, prompt) }
                     .padding(horizontal = 14.dp, vertical = 8.dp)
             ) {
@@ -814,11 +783,12 @@ private fun VoiceQuickActionsRow(
 @OptIn(androidx.compose.foundation.ExperimentalFoundationApi::class)
 @Composable
 private fun ConversationHistorySheet(
-    transcripts: List<TranscriptEntry>,
+    viewModel: MainViewModel,
     onSendMessage: (String) -> Unit,
     onClose: () -> Unit,
     onClear: () -> Unit
 ) {
+    val transcripts by viewModel.transcripts.collectAsStateWithLifecycle()
     val context = LocalContext.current
     val clipboardManager = LocalClipboardManager.current
     val focusManager = LocalFocusManager.current
@@ -827,7 +797,7 @@ private fun ConversationHistorySheet(
 
     LaunchedEffect(transcripts.size) {
         if (transcripts.isNotEmpty()) {
-            listState.animateScrollToItem(transcripts.size - 1)
+            listState.scrollToItem(transcripts.size - 1)
         }
     }
 

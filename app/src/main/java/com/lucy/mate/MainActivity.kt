@@ -1,4 +1,4 @@
-﻿package com.lucy.mate
+package com.lucy.mate
 
 import android.Manifest
 import android.content.Context
@@ -40,11 +40,11 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
-import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -118,8 +118,8 @@ class MainActivity : ComponentActivity() {
         setContent {
             GeminiVoiceTheme {
                 var currentScreen by currentScreenState
-                val userSession by userManager.currentUser.collectAsState()
-                val downgradeNotice by userManager.tierDowngradeNotice.collectAsState()
+                val userSession by userManager.currentUser.collectAsStateWithLifecycle()
+                val downgradeNotice by userManager.tierDowngradeNotice.collectAsStateWithLifecycle()
 
                 // Security Lockdown: Immediately enforce AuthGate if no valid session exists
                 LaunchedEffect(userSession) {
@@ -294,6 +294,10 @@ class MainActivity : ComponentActivity() {
     }
 }
 
+private val BottomBarShape = RoundedCornerShape(32.dp)
+private val NavItemShape = RoundedCornerShape(20.dp)
+private val BottomBarBorder = androidx.compose.foundation.BorderStroke(1.dp, PinkyBorder)
+
 @Composable
 private fun SoltiniBottomBar(
     currentTab: String,
@@ -301,9 +305,9 @@ private fun SoltiniBottomBar(
 ) {
     Card(
         modifier = Modifier.fillMaxWidth(),
-        shape = RoundedCornerShape(32.dp),
+        shape = BottomBarShape,
         colors = CardDefaults.cardColors(containerColor = PearlWhiteSurface),
-        border = androidx.compose.foundation.BorderStroke(1.dp, PinkyBorder),
+        border = BottomBarBorder,
         elevation = CardDefaults.cardElevation(defaultElevation = 8.dp)
     ) {
         Row(
@@ -350,7 +354,7 @@ private fun SoltiniNavItem(
 ) {
     Box(
         modifier = Modifier
-            .clip(RoundedCornerShape(20.dp))
+            .clip(NavItemShape)
             .clickable { onClick() }
             .padding(horizontal = 14.dp, vertical = 6.dp),
         contentAlignment = Alignment.Center

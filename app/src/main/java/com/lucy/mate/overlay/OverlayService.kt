@@ -1,4 +1,4 @@
-﻿package com.lucy.mate.overlay
+package com.lucy.mate.overlay
 
 import android.annotation.SuppressLint
 import android.app.AlarmManager
@@ -174,6 +174,7 @@ class OverlayService : Service() {
     private val mainHandler = Handler(Looper.getMainLooper())
     private val bridge = AriaNativeBridge(this)
     private val overlayLive2DEngine = SoltiniLive2DEngine(engineTag = "Overlay")
+    private val appSettings by lazy { com.lucy.mate.settings.AppSettings.getInstance(this) }
     private var voiceService: com.lucy.mate.services.BackgroundVoiceService? = null
     private var isBound = false
 
@@ -287,7 +288,7 @@ class OverlayService : Service() {
             bindService(intent, connection, Context.BIND_AUTO_CREATE)
         }
 
-        if (AppSettings(this).isAppPaused) {
+        if (appSettings.isAppPaused) {
             android.util.Log.i("OverlayService", "App is paused — skipping overlay setup and stopping")
             stopSelf()
             return
@@ -303,7 +304,7 @@ class OverlayService : Service() {
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        if (AppSettings(this).isAppPaused) {
+        if (appSettings.isAppPaused) {
             stopSelf()
             return START_NOT_STICKY
         }
@@ -323,7 +324,6 @@ class OverlayService : Service() {
     override fun onTaskRemoved(rootIntent: Intent?) {
         super.onTaskRemoved(rootIntent)
         android.util.Log.i("OverlayService", "onTaskRemoved: task cleared from recents")
-        val appSettings = AppSettings(this)
         if (appSettings.isAppPaused) {
             android.util.Log.i("OverlayService", "App is paused, skipping overlay resurrection")
             return
@@ -390,90 +390,9 @@ class OverlayService : Service() {
         }
     }
 
-    @SuppressLint("SetJavaScriptEnabled")
     private fun getOrCreateWebView(): WebView {
         webView?.let { return it }
-        val assetLoader = androidx.webkit.WebViewAssetLoader.Builder()
-            .addPathHandler("/assets/", androidx.webkit.WebViewAssetLoader.AssetsPathHandler(this))
-            .build()
-
-        val wv = WebView(this).apply {
-            settings.apply {
-                javaScriptEnabled = true
-                allowFileAccess = true
-                @Suppress("DEPRECATION")
-                allowFileAccessFromFileURLs = true
-                @Suppress("DEPRECATION")
-                allowUniversalAccessFromFileURLs = true
-                domStorageEnabled = true
-                cacheMode = WebSettings.LOAD_NO_CACHE
-                mediaPlaybackRequiresUserGesture = false
-            }
-            setBackgroundColor(Color.TRANSPARENT)
-            setLayerType(View.LAYER_TYPE_HARDWARE, null)
-            addJavascriptInterface(bridge, "AriaNative")
-            webViewClient = object : WebViewClient() {
-                override fun shouldInterceptRequest(
-                    view: WebView?,
-                    request: android.webkit.WebResourceRequest?
-                ): android.webkit.WebResourceResponse? {
-                    val url = request?.url ?: return null
-
-                    // 1. Direct handling of .vrm with full binary response and CORS headers
-                    if (url.path?.endsWith(".vrm", ignoreCase = true) == true) {
-                        try {
-                            val assetPath = url.path!!.trimStart('/').removePrefix("assets/")
-                            val isStream = assets.open(assetPath)
-                            val length = try {
-                                assets.openFd(assetPath).length.toString()
-                            } catch (e: Exception) {
-                                null
-                            }
-                            val headers = mutableMapOf(
-                                "Access-Control-Allow-Origin" to "*",
-                                "Access-Control-Allow-Methods" to "GET, OPTIONS, HEAD",
-                                "Access-Control-Allow-Headers" to "*",
-                                "Content-Type" to "model/gltf-binary"
-                            )
-                            length?.let { headers["Content-Length"] = it }
-                            return android.webkit.WebResourceResponse("model/gltf-binary", null, 200, "OK", headers, isStream)
-                        } catch (e: Exception) {
-                            android.util.Log.e("OverlayService", "Failed direct soltini.vrm load", e)
-                        }
-                    }
-
-                    // 2. Delegate all other assets through WebViewAssetLoader with CORS headers
-                    val response = assetLoader.shouldInterceptRequest(url)
-                    if (response != null) {
-                        val headers = HashMap(response.responseHeaders ?: emptyMap())
-                        headers["Access-Control-Allow-Origin"] = "*"
-                        headers["Access-Control-Allow-Methods"] = "GET, OPTIONS, HEAD"
-                        headers["Access-Control-Allow-Headers"] = "*"
-                        response.responseHeaders = headers
-                        if (url.path?.endsWith(".js", ignoreCase = true) == true) {
-                            response.mimeType = "application/javascript"
-                        }
-                        return response
-                    }
-                    return null
-                }
-
-                override fun onPageFinished(view: WebView?, url: String?) {
-                    super.onPageFinished(view, url)
-                    android.util.Log.d("OverlayService", "WebView page finished: $url")
-                    view?.evaluateJavascript("window.dispatchEvent(new Event('resize')); if (window.Aria) { window.Aria.setListening(true); }", null)
-                }
-
-                override fun onReceivedError(
-                    view: WebView?,
-                    request: android.webkit.WebResourceRequest?,
-                    error: android.webkit.WebResourceError?
-                ) {
-                    android.util.Log.e("OverlayService", "WebView error: ${error?.description} for ${request?.url}")
-                }
-            }
-            loadUrl("https://appassets.androidplatform.net/assets/avatar/index.html")
-        }
+        val wv = com.lucy.mate.engine.VrmWebViewHelper.createConfiguredWebView(this, bridge)
         webView = wv
         overlayView.addView(wv, 0, FrameLayout.LayoutParams(
             FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT
@@ -538,8 +457,7 @@ class OverlayService : Service() {
         overlayView.addView(errorTextView, errorParams)
 
         // ── Window layout params ──────────────────────────────────────────────
-        val settings = AppSettings(this)
-        val initialSizeDp = settings.getFloatingSizeDp(settings.visualizerMode)
+        val initialSizeDp = appSettings.getFloatingSizeDp(appSettings.visualizerMode)
         val widthPx  = (initialSizeDp * resources.displayMetrics.density).toInt()
         val heightPx = (initialSizeDp * resources.displayMetrics.density).toInt()
 
@@ -559,10 +477,9 @@ class OverlayService : Service() {
             val screenWidth = resources.displayMetrics.widthPixels
             val screenHeight = resources.displayMetrics.heightPixels
             gravity = Gravity.TOP or Gravity.START
-            val settings = AppSettings(this@OverlayService)
-            if (settings.overlayPositionX != -9999 && settings.overlayPositionY != -9999) {
-                x = settings.overlayPositionX
-                y = settings.overlayPositionY
+            if (appSettings.overlayPositionX != -9999 && appSettings.overlayPositionY != -9999) {
+                x = appSettings.overlayPositionX
+                y = appSettings.overlayPositionY
             } else {
                 x = screenWidth - widthPx - (12 * resources.displayMetrics.density).toInt()
                 y = (screenHeight * 0.35f).toInt()
@@ -599,10 +516,8 @@ class OverlayService : Service() {
                 windowManager.updateViewLayout(overlayView, layoutParams)
             } catch (_: Exception) {}
 
-            AppSettings(this@OverlayService).apply {
-                overlayPositionX = layoutParams.x
-                overlayPositionY = layoutParams.y
-            }
+            appSettings.overlayPositionX = layoutParams.x
+            appSettings.overlayPositionY = layoutParams.y
         }
 
         overlayView.onTap = {
@@ -620,8 +535,7 @@ class OverlayService : Service() {
         // ── Add to window ─────────────────────────────────────────────────────
         try {
             windowManager.addView(overlayView, layoutParams)
-            val settings = AppSettings(this)
-            updateVisualizer(settings.visualizerMode, settings.characterPersona)
+            updateVisualizer(appSettings.visualizerMode, appSettings.characterPersona)
         } catch (e: Exception) {
             android.util.Log.e("OverlayService", "addView failed: ${e.message}")
             stopSelf()
@@ -672,13 +586,12 @@ class OverlayService : Service() {
     fun updateVisualizer(mode: String, characterName: String) {
         currentVisualizerMode = mode
         currentCharacterName = characterName
-        val isVrm = characterName.contains("Soltini", ignoreCase = true) ||
-                characterName == AppSettings.CHARACTER_SOLTINI
+        val isVrm = appSettings.isVrmCharacter(characterName)
 
         android.util.Log.i("OverlayService", "updateVisualizer: mode=$mode, character=$characterName, isVrm=$isVrm")
 
         // Dynamically adjust window size to the configured preference for this visualizer mode
-        val preferredSize = AppSettings(this).getFloatingSizeDp(mode)
+        val preferredSize = appSettings.getFloatingSizeDp(mode)
         updateWindowSize(preferredSize)
 
         mainHandler.post {
@@ -715,8 +628,7 @@ class OverlayService : Service() {
     fun onModelReady() {
         mainHandler.post {
             android.util.Log.d("OverlayService", "onModelReady: 3D VRM ready")
-            val isVrm = currentCharacterName.contains("Soltini", ignoreCase = true) ||
-                    currentCharacterName == AppSettings.CHARACTER_SOLTINI
+            val isVrm = appSettings.isVrmCharacter(currentCharacterName)
             if (currentVisualizerMode.equals("AVATAR", ignoreCase = true) && isVrm) {
                 ringIndicatorView.visibility = View.GONE
                 webView?.visibility = View.VISIBLE
@@ -911,8 +823,7 @@ class OverlayService : Service() {
             return
         }
 
-        val isVrm = currentCharacterName.contains("Soltini", ignoreCase = true) ||
-                currentCharacterName == AppSettings.CHARACTER_SOLTINI
+        val isVrm = appSettings.isVrmCharacter(currentCharacterName)
 
         if (isVrm) {
             val now = SystemClock.uptimeMillis()
@@ -1136,7 +1047,7 @@ class OverlayService : Service() {
             )
         }
 
-        val currentSizeDp = AppSettings(this).getFloatingSizeDp(currentVisualizerMode)
+        val currentSizeDp = appSettings.getFloatingSizeDp(currentVisualizerMode)
         val sliderValueLabel = android.widget.TextView(this).apply {
             text = "${currentSizeDp}dp"
             setTextColor(Color.parseColor("#F43F8E"))
@@ -1161,7 +1072,6 @@ class OverlayService : Service() {
                     val newSize = progress + 60
                     sliderValueLabel.text = "${newSize}dp"
                     updateWindowSize(newSize)
-                    val appSettings = AppSettings(this@OverlayService)
                     if (currentVisualizerMode.equals("ORB", ignoreCase = true)) {
                         appSettings.floatingOrbSizeDp = newSize
                     } else {
