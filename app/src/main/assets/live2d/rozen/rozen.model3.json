@@ -1,0 +1,39 @@
+{
+	"Version": 3,
+	"FileReferences": {
+		"Moc": "rozen.moc3",
+		"Textures": [
+			"textures/texture_00.png",
+			"textures/texture_01.png"
+		],
+		"Physics": "rozen.physics3.json",
+		"DisplayInfo": "rozen.cdi3.json",
+		"Expressions": [
+			{
+				"Name": "expression_1",
+				"File": "expressions/expression_1.exp3.json"
+			},
+			{
+				"Name": "expression_2",
+				"File": "expressions/expression_2.exp3.json"
+			}
+		]
+	},
+	"Groups": [
+		{
+			"Target": "Parameter",
+			"Name": "LipSync",
+			"Ids": [
+				"ParamMouthOpenY"
+			]
+		},
+		{
+			"Target": "Parameter",
+			"Name": "EyeBlink",
+			"Ids": [
+				"ParamEyeLOpen",
+				"ParamEyeROpen"
+			]
+		}
+	]
+}

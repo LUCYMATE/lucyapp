@@ -18,6 +18,7 @@ import com.lucy.mate.R
 
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.layout.Arrangement
@@ -153,7 +154,9 @@ enum class VisualizerChoice(
     ORB("Sound Orb", "🌸", VisualizerMode.ORB, ""),
     MAYA("Maya", "🌸", VisualizerMode.AVATAR, "Maya"),
     FRIDAY("Friday", "⚡", VisualizerMode.AVATAR, "Friday"),
-    VENOM("Venom", "🖤", VisualizerMode.AVATAR, "Venom");
+    VENOM("Venom", "🖤", VisualizerMode.AVATAR, "Venom"),
+    ROZEN("Rozen", "🌹", VisualizerMode.AVATAR, "Rozen"),
+    SHIROKO("Shiroko", "❄️", VisualizerMode.AVATAR, "Shiroko");
 
     companion object {
         fun from(mode: VisualizerMode, char: String): VisualizerChoice {
@@ -165,6 +168,8 @@ enum class VisualizerChoice(
                     char.contains("Maya", ignoreCase = true) -> MAYA
                     char.contains("Friday", ignoreCase = true) -> FRIDAY
                     char.contains("Venom", ignoreCase = true) -> VENOM
+                    char.contains("Rozen", ignoreCase = true) -> ROZEN
+                    char.contains("Shiroko", ignoreCase = true) -> SHIROKO
                     else -> LUCY_3D
                 }
             }
@@ -1239,19 +1244,27 @@ private fun QuickPanelSheet(
                     if (visualizerMode == VisualizerMode.AVATAR) {
                         Spacer(Modifier.height(10.dp))
                         Row(
-                            modifier = Modifier.fillMaxWidth(),
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .horizontalScroll(rememberScrollState()),
                             horizontalArrangement = Arrangement.spacedBy(6.dp)
                         ) {
-                            listOf("LUCY" to "👑", "Maya" to "🌸", "Friday" to "⚡", "Venom" to "🖤").forEach { (charName, emoji) ->
+                            listOf(
+                                "LUCY" to "👑",
+                                "Maya" to "🌸",
+                                "Friday" to "⚡",
+                                "Venom" to "🖤",
+                                "Rozen" to "🌹",
+                                "Shiroko" to "❄️"
+                            ).forEach { (charName, emoji) ->
                                 val isSelected = selectedCharacter.equals(charName, ignoreCase = true)
                                 Box(
                                     modifier = Modifier
-                                        .weight(1f)
                                         .clip(RoundedCornerShape(12.dp))
                                         .background(if (isSelected) RosePink.copy(alpha = 0.15f) else PearlWhiteSurface)
                                         .border(1.dp, if (isSelected) RosePink else PinkyBorder, RoundedCornerShape(12.dp))
                                         .clickable { onCharacterChange(charName) }
-                                        .padding(vertical = 6.dp),
+                                        .padding(horizontal = 10.dp, vertical = 6.dp),
                                     contentAlignment = Alignment.Center
                                 ) {
                                     Text(

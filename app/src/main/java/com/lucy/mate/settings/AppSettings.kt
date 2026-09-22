@@ -220,12 +220,16 @@ class AppSettings private constructor(context: Context) {
         const val CHARACTER_MAYA = "Maya"
         const val CHARACTER_FRIDAY = "Friday"
         const val CHARACTER_VENOM = "Venom"
+        const val CHARACTER_ROZEN = "Rozen"
+        const val CHARACTER_SHIROKO = "Shiroko"
 
         val AVAILABLE_CHARACTERS = listOf(
             CHARACTER_LUCY,
             CHARACTER_MAYA,
             CHARACTER_FRIDAY,
-            CHARACTER_VENOM
+            CHARACTER_VENOM,
+            CHARACTER_ROZEN,
+            CHARACTER_SHIROKO
         )
 
         const val DEFAULT_VOICE = "Aoede"

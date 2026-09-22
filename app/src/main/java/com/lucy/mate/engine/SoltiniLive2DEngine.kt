@@ -1,4 +1,4 @@
-﻿package com.lucy.mate.engine
+package com.lucy.mate.engine
 
 import android.content.Context
 import android.opengl.GLES20
@@ -189,6 +189,8 @@ class SoltiniLive2DEngine(
             characterName.contains("Maya", ignoreCase = true) -> AppSettings.CHARACTER_MAYA
             characterName.contains("Friday", ignoreCase = true) -> AppSettings.CHARACTER_FRIDAY
             characterName.contains("Venom", ignoreCase = true) -> AppSettings.CHARACTER_VENOM
+            characterName.contains("Rozen", ignoreCase = true) -> AppSettings.CHARACTER_ROZEN
+            characterName.contains("Shiroko", ignoreCase = true) -> AppSettings.CHARACTER_SHIROKO
             else -> AppSettings.CHARACTER_MAYA
         }
         if (pendingCharacter != normalized) {
@@ -198,6 +200,10 @@ class SoltiniLive2DEngine(
         if (context != null) {
             preloadCharacter(context, normalized)
         }
+    }
+
+    fun setCharacter(characterName: String, context: Context? = null) {
+        requestCharacter(characterName, context)
     }
 
     /**
@@ -215,6 +221,8 @@ class SoltiniLive2DEngine(
             AppSettings.CHARACTER_MAYA -> "live2d/maya" to "Mao.model3.json"
             AppSettings.CHARACTER_FRIDAY -> "live2d/friday" to "Haru.model3.json"
             AppSettings.CHARACTER_VENOM -> "live2d/venom" to "Natori.model3.json"
+            AppSettings.CHARACTER_ROZEN -> "live2d/rozen" to "rozen.model3.json"
+            AppSettings.CHARACTER_SHIROKO -> "live2d/shiroko" to "shiroko.model3.json"
             else -> "live2d/maya" to "Mao.model3.json"
         }
     }

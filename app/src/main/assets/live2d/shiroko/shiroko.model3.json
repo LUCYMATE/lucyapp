@@ -1,0 +1,65 @@
+{
+	"Version": 3,
+	"FileReferences": {
+		"Moc": "shiroko.moc3",
+		"Textures": [
+			"textures/texture_00.png",
+			"textures/texture_01.png",
+			"textures/texture_02.png",
+			"textures/texture_03.png"
+		],
+		"Physics": "shiroko.physics3.json",
+		"DisplayInfo": "shiroko.cdi3.json",
+		"Expressions": [
+			{
+				"Name": "cat",
+				"File": "expressions/cat.exp3.json"
+			},
+			{
+				"Name": "cat_eyes",
+				"File": "expressions/cat_eyes.exp3.json"
+			},
+			{
+				"Name": "apron",
+				"File": "expressions/apron.exp3.json"
+			},
+			{
+				"Name": "camera",
+				"File": "expressions/camera.exp3.json"
+			},
+			{
+				"Name": "holding_pen",
+				"File": "expressions/holding_pen.exp3.json"
+			},
+			{
+				"Name": "tap",
+				"File": "expressions/tap.exp3.json"
+			},
+			{
+				"Name": "cat_filter",
+				"File": "expressions/cat_filter.exp3.json"
+			},
+			{
+				"Name": "glasses",
+				"File": "expressions/glasses.exp3.json"
+			}
+		]
+	},
+	"Groups": [
+		{
+			"Target": "Parameter",
+			"Name": "EyeBlink",
+			"Ids": [
+				"ParamEyeLOpen",
+				"ParamEyeROpen"
+			]
+		},
+		{
+			"Target": "Parameter",
+			"Name": "LipSync",
+			"Ids": [
+				"ParamMouthOpenY"
+			]
+		}
+	]
+}

@@ -1,4 +1,4 @@
-﻿package com.lucy.mate.engine
+package com.lucy.mate.engine
 
 import android.content.Context
 import android.graphics.Bitmap
@@ -197,16 +197,19 @@ class SoltiniLive2DModel : CubismUserModel() {
 
             textureIds.clear()
             val textureCount = setting.textureCount
-            val options = BitmapFactory.Options().apply {
-                inScaled = false
-                inPremultiplied = true
+
+            // Query hardware GL_MAX_TEXTURE_SIZE directly on the GL thread
+            val maxTexSizeArr = IntArray(1)
+            GLES20.glGetIntegerv(GLES20.GL_MAX_TEXTURE_SIZE, maxTexSizeArr, 0)
+            if (maxTexSizeArr[0] > 0) {
+                maxTextureDimension = maxTexSizeArr[0]
             }
 
             for (i in 0 until textureCount) {
                 val textureFile = setting.getTextureFileName(i)
                 if (!textureFile.isNullOrEmpty()) {
                     val texturePath = "$dir/$textureFile"
-                    val bitmap = getOrDecodeTexture(assetManager, texturePath, options)
+                    val bitmap = getOrDecodeTexture(assetManager, texturePath)
                     if (bitmap != null) {
                         val ids = IntArray(1)
                         GLES20.glGenTextures(1, ids, 0)
@@ -365,18 +368,67 @@ class SoltiniLive2DModel : CubismUserModel() {
         private val assetByteCache = java.util.concurrent.ConcurrentHashMap<String, ByteArray>()
         private val textureBitmapCache = java.util.concurrent.ConcurrentHashMap<String, Bitmap>()
 
-        private fun getOrDecodeTexture(assetManager: AssetManager, path: String, options: BitmapFactory.Options): Bitmap? {
+        @Volatile
+        var maxTextureDimension: Int = 4096
+
+        private fun getOrDecodeTexture(assetManager: AssetManager, path: String): Bitmap? {
             textureBitmapCache[path]?.let {
                 if (!it.isRecycled) return it
             }
             return try {
-                assetManager.open(path).use { stream ->
-                    BitmapFactory.decodeStream(stream, null, options)
-                }?.also {
-                    textureBitmapCache[path] = it
+                // 1. Inspect image dimensions without allocating full pixel memory
+                val boundsOptions = BitmapFactory.Options().apply {
+                    inJustDecodeBounds = true
                 }
-            } catch (e: Exception) {
-                Log.e(TAG, "Failed decoding texture: $path", e)
+                assetManager.open(path).use { stream ->
+                    BitmapFactory.decodeStream(stream, null, boundsOptions)
+                }
+
+                // 2. Compute sample size to ensure texture fits within max GL texture size
+                val maxDim = maxTextureDimension.coerceAtLeast(2048)
+                var sampleSize = 1
+                var w = boundsOptions.outWidth
+                var h = boundsOptions.outHeight
+                while (w > maxDim || h > maxDim) {
+                    sampleSize *= 2
+                    w /= 2
+                    h /= 2
+                }
+
+                // 3. Decode bitmap with pre-multiplied alpha and power-of-2 downsampling
+                val decodeOptions = BitmapFactory.Options().apply {
+                    inScaled = false
+                    inPremultiplied = true
+                    inSampleSize = sampleSize
+                }
+
+                val bitmap = try {
+                    assetManager.open(path).use { stream ->
+                        BitmapFactory.decodeStream(stream, null, decodeOptions)
+                    }
+                } catch (oom: OutOfMemoryError) {
+                    Log.w(TAG, "OOM decoding $path at sampleSize=$sampleSize, evicting cache and retrying at sampleSize=${sampleSize * 2}")
+                    for ((_, bmp) in textureBitmapCache) {
+                        try {
+                            if (!bmp.isRecycled) bmp.recycle()
+                        } catch (_: Throwable) {}
+                    }
+                    textureBitmapCache.clear()
+                    System.gc()
+                    decodeOptions.inSampleSize = sampleSize * 2
+                    assetManager.open(path).use { stream ->
+                        BitmapFactory.decodeStream(stream, null, decodeOptions)
+                    }
+                }
+
+                bitmap?.also {
+                    textureBitmapCache[path] = it
+                    if (sampleSize > 1) {
+                        Log.i(TAG, "Downsampled texture $path by ${sampleSize}x to ${it.width}x${it.height} (max GL size: $maxDim)")
+                    }
+                }
+            } catch (t: Throwable) {
+                Log.e(TAG, "Failed decoding texture: $path", t)
                 null
             }
         }
@@ -487,15 +539,11 @@ class SoltiniLive2DModel : CubismUserModel() {
                 }
 
                 // 7. Textures (decode bitmaps in background on ModelLoader thread)
-                val options = BitmapFactory.Options().apply {
-                    inScaled = false
-                    inPremultiplied = true
-                }
                 for (i in 0 until setting.textureCount) {
                     val textureFile = setting.getTextureFileName(i)
                     if (!textureFile.isNullOrEmpty()) {
                         val texturePath = "$dir/$textureFile"
-                        getOrDecodeTexture(assetManager, texturePath, options)
+                        getOrDecodeTexture(assetManager, texturePath)
                     }
                 }
                 Log.d(TAG, "Preloaded assets and textures for $dir on background thread")

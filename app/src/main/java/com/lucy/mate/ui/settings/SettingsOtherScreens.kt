@@ -1,4 +1,4 @@
-﻿package com.lucy.mate.ui.settings
+package com.lucy.mate.ui.settings
 
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.*
@@ -295,12 +295,7 @@ fun SettingsFloatingOverlayScreen(appSettings: AppSettings?) {
     val isAvatarMode = visualizerMode.equals("AVATAR", ignoreCase = true)
     var windowSize by remember { mutableFloatStateOf((appSettings?.getFloatingSizeDp() ?: 100).toFloat()) }
 
-    val characters = listOf(
-        AppSettings.CHARACTER_LUCY,
-        AppSettings.CHARACTER_MAYA,
-        AppSettings.CHARACTER_FRIDAY,
-        AppSettings.CHARACTER_VENOM
-    )
+    val characters = AppSettings.AVAILABLE_CHARACTERS
     var selectedChar by remember {
         mutableStateOf(appSettings?.characterPersona ?: AppSettings.CHARACTER_LUCY)
     }
